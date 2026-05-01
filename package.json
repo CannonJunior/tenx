@@ -1,0 +1,13 @@
+{
+  "name": "tenx-stock-analyzer",
+  "version": "1.0.0",
+  "description": "Semiconductor sector stock analyzer with 24-month price history",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "dotenv": "^16.0.0"
+  }
+}
