@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 /**
- * fetch-transcripts.js  —  SEC EDGAR downloader for NLP model inputs
+ * fetch-transcripts.js  --  SEC EDGAR downloader for NLP model inputs
  *
  * These 10 large-cap semiconductor companies do NOT file earnings call
  * transcripts directly with the SEC (they go to Bloomberg/FactSet instead).
  * We therefore pull two richer, always-available sources:
  *
  *   1. EARNINGS PRESS RELEASES  (source_type = 'press_release')
- *      8-K Exhibit 99.1 filed on earnings date — management quote, revenue,
- *      margin commentary, forward guidance.  ~1,000–5,000 words per quarter.
+ *      8-K Exhibit 99.1 filed on earnings date -- management quote, revenue,
+ *      margin commentary, forward guidance.  ~1,000-5,000 words per quarter.
  *
  *   2. 10-Q MD&A SECTIONS  (source_type = '10q_mda')
  *      "Management's Discussion and Analysis" extracted from the quarterly
- *      10-Q filing.  Longer, regulatory-scrutinised narrative — strategic
- *      direction, segment discussion, risk language.  ~5,000–15,000 words.
+ *      10-Q filing.  Longer, regulatory-scrutinised narrative -- strategic
+ *      direction, segment discussion, risk language.  ~5,000-15,000 words.
  *
  * Together these give 8 NLP data points per stock per year (~40 over 5 years)
  * across all 10 stocks without any API key or payment.
@@ -22,13 +22,13 @@
  * We use a 250 ms gap (~4 req/sec) throughout.
  *
  * NLP features extracted (no external dependencies):
- *   sentiment_score   — Loughran-McDonald positive/negative word ratio
- *   ai_dc_mentions    — AI/data-center keyword count (NVDA, AMD, AVGO leading)
- *   demand_pos/neg    — positive/negative demand language
- *   pricing_pos/neg   — pricing power vs pricing pressure
- *   memory_mentions   — DRAM/HBM/NAND terms (MU signal)
- *   equip_mentions    — WFE/backlog/utilisation terms (AMAT/LRCX/KLAC signal)
- *   guidance_up/down  — guidance raised vs lowered language
+ *   sentiment_score   -- Loughran-McDonald positive/negative word ratio
+ *   ai_dc_mentions    -- AI/data-center keyword count (NVDA, AMD, AVGO leading)
+ *   demand_pos/neg    -- positive/negative demand language
+ *   pricing_pos/neg   -- pricing power vs pricing pressure
+ *   memory_mentions   -- DRAM/HBM/NAND terms (MU signal)
+ *   equip_mentions    -- WFE/backlog/utilisation terms (AMAT/LRCX/KLAC signal)
+ *   guidance_up/down  -- guidance raised vs lowered language
  */
 
 'use strict';
@@ -40,13 +40,13 @@ const db = require('./database');
 const USER_AGENT = 'TenX-Stock-Analyzer/1.0 (research; contact: chris.cannon@gmail.com)';
 
 const STOCKS = [
-    { symbol: 'MU',   name: 'Micron Technology',       cik: '723254'  },
+    { symbol: 'MU',   name: 'Micron Technology',       cik: '723125'  },
     { symbol: 'KLAC', name: 'KLA Corporation',          cik: '319201'  },
     { symbol: 'AMD',  name: 'Advanced Micro Devices',   cik: '2488'    },
     { symbol: 'AVGO', name: 'Broadcom',                 cik: '1730168' },
     { symbol: 'NVDA', name: 'Nvidia',                   cik: '1045810' },
     { symbol: 'LRCX', name: 'Lam Research',             cik: '707549'  },
-    { symbol: 'AMAT', name: 'Applied Materials',        cik: '796343'  },
+    { symbol: 'AMAT', name: 'Applied Materials',        cik: '6951'    },
     { symbol: 'MPWR', name: 'Monolithic Power Systems', cik: '1280452' },
     { symbol: 'ADI',  name: 'Analog Devices',           cik: '6281'    },
     { symbol: 'QCOM', name: 'Qualcomm',                 cik: '804328'  },
@@ -69,27 +69,59 @@ function htmlToText(html) {
     return html
         .replace(/<script[\s\S]*?<\/script>/gi, '')
         .replace(/<style[\s\S]*?<\/style>/gi, '')
+        // iXBRL tags: strip the tag but keep text content
+        .replace(/<ix:[^>]+>/gi, '').replace(/<\/ix:[^>]+>/gi, '')
         .replace(/<br\s*\/?>/gi, '\n')
-        .replace(/<\/(?:p|div|tr|li|h[1-6]|section)>/gi, '\n')
+        .replace(/<\/(?:p|div|tr|li|h[1-6]|section|td|th)>/gi, '\n')
         .replace(/<[^>]+>/g, ' ')
         .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
         .replace(/&nbsp;|&#160;/g, ' ').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-        .replace(/&#8[12]\d\d;/g, m => ({ '&#8220;':'"','&#8221;':'"','&#8212;':'—','&#8211;':'–','&#8216;':"'",'&#8217;':"'" }[m] || m))
+        .replace(/&#8220;/g, '"').replace(/&#8221;/g, '"')
+        .replace(/&#8216;/g, "'").replace(/&#8217;/g, "'")
+        .replace(/&#8212;/g, '-').replace(/&#8211;/g, '-')
         .replace(/[ \t]+/g, ' ').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-// ── Section extraction ────────────────────────────────────────────────
-// Extract MD&A from a 10-Q / 10-K document
-function extractMDA(text) {
-    const startRe = /MANAGEMENT[’']?S?\s+DISCUSSION\s+AND\s+ANALYSIS/i;
-    const endRe   = /(?:QUANTITATIVE\s+AND\s+QUALITATIVE|CONTROLS\s+AND\s+PROCEDURES|FINANCIAL\s+STATEMENTS\s+AND\s+SUPPLEMENTARY|PART\s+II\b)/i;
+// ── Remove financial-table lines (rows of numbers) ───────────────────
+// Lines where more than 60% of tokens are numeric are likely table rows.
+function stripFinancialTables(text) {
+    return text.split('\n').filter(line => {
+        const tokens = line.trim().split(/\s+/).filter(t => t.length > 0);
+        if (tokens.length < 3) return true; // keep short lines
+        const numCount = tokens.filter(t => /^[\$\(\),.\-\d]+$/.test(t)).length;
+        return numCount / tokens.length < 0.6;
+    }).join('\n');
+}
 
-    const si = text.search(startRe);
+// ── Section extraction ────────────────────────────────────────────────
+// Find the ACTUAL MD&A section (not the TOC entry).
+// SEC 10-Q structure: "Item 2. Management's Discussion" marks the actual section.
+// TOC entries look like: "Management's Discussion ... 22" (just a page number after).
+function extractMDA(text) {
+    // Primary: "Item 2" prefix distinguishes real section from TOC
+    const itemRe = /Item\s+2\.?\s*\n?\s*(?:Management['']?s?\s+Discussion\s+and\s+Analysis)/i;
+    const endRe  = /Item\s+3\b|Quantitative\s+and\s+Qualitative\s+Disclosures|Part\s+II\b(?:\s|$)/i;
+
+    let si = text.search(itemRe);
+
+    // Fallback: find occurrences of the heading that are NOT followed by a lone page number
+    if (si < 0) {
+        const re = /Management['']?s?\s+Discussion\s+and\s+Analysis/gi;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            const after200 = text.slice(m.index + m[0].length, m.index + m[0].length + 150);
+            const isTOC = /^\s*\n?\s*\d{1,3}\s*\n/m.test(after200);
+            if (!isTOC) { si = m.index; break; }
+        }
+    }
     if (si < 0) return null;
 
-    const after = text.slice(si);
-    const ei    = after.slice(300).search(endRe); // skip the heading itself
-    return (ei > 0 ? after.slice(0, ei + 300) : after).trim();
+    const section = text.slice(si);
+    const ei = section.slice(400).search(endRe);
+    const raw = (ei > 0 ? section.slice(0, ei + 400) : section).trim();
+
+    // Strip number-heavy table lines to get clean prose
+    return stripFinancialTables(raw);
 }
 
 // Identify a press release (financial results, NOT a transcript or balance sheet)
@@ -339,7 +371,7 @@ async function fetchForStock(stock, cutoffDate) {
 
             const docs = await getFilingDocs(cik, filing.accession);
 
-            // Primary document is the 10-Q form itself — check it first
+            // Primary document is the 10-Q form itself -- check it first
             const primaryUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${filing.accession.replace(/-/g, '')}/${filing.primaryDoc}`;
             const toCheck = [{ url: primaryUrl }, ...docs.filter(d => d.url !== primaryUrl && d.url.endsWith('.htm'))];
 
@@ -378,7 +410,7 @@ async function fetchAllTranscripts(symbols = null, cutoffDate = '2021-01-01') {
         ? STOCKS.filter(s => symbols.includes(s.symbol))
         : STOCKS;
 
-    console.log(`[transcripts] SEC EDGAR — press releases + 10-Q MD&A for ${targets.length} stocks`);
+    console.log(`[transcripts] SEC EDGAR -- press releases + 10-Q MD&A for ${targets.length} stocks`);
     console.log(`[transcripts] Cutoff: ${cutoffDate}  Rate: ~4 req/sec`);
 
     const results = {};
@@ -389,7 +421,7 @@ async function fetchAllTranscripts(symbols = null, cutoffDate = '2021-01-01') {
         total += results[stock.symbol].fetched;
     }
 
-    console.log(`\n[transcripts] Done — ${total} documents stored`);
+    console.log(`\n[transcripts] Done -- ${total} documents stored`);
     for (const [sym, r] of Object.entries(results)) {
         if (r.fetched) console.log(`  ${sym}: ${r.fetched} fetched`);
     }

@@ -284,8 +284,9 @@ html, body {
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
-.badge-semi { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
-.badge-equip { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+.badge-semi    { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
+.badge-equip   { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+.badge-storage { background: rgba(52, 211, 153, 0.15); color: #34D399; }
 
 /* ── Compare View ── */
 .compare-view { }

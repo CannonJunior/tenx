@@ -11,6 +11,9 @@ const COLORS = {
     MPWR: '#F0B27A',
     ADI:  '#85C1E9',
     QCOM: '#F1948A',
+    SNDK: '#A78BFA',
+    WDC:  '#34D399',
+    STX:  '#FB923C',
 };
 
 // hex → rgba helper
@@ -96,8 +99,12 @@ function updateStats() {
 // ── Build a chart card (no-data state) ───────────────────────────────
 function buildCard(stock) {
     const color = COLORS[stock.symbol] || '#58A6FF';
-    const badgeClass = stock.subIndustry.includes('Equipment') ? 'badge-equip' : 'badge-semi';
-    const badgeLabel = stock.subIndustry.includes('Equipment') ? 'Equip' : 'Semi';
+    const badgeClass = stock.subIndustry.includes('Equipment') ? 'badge-equip'
+                     : stock.subIndustry.includes('Storage')   ? 'badge-storage'
+                     : 'badge-semi';
+    const badgeLabel = stock.subIndustry.includes('Equipment') ? 'Equip'
+                     : stock.subIndustry.includes('Storage')   ? 'Storage'
+                     : 'Semi';
 
     const card = document.createElement('div');
     card.className = 'chart-card';
@@ -112,7 +119,7 @@ function buildCard(stock) {
                 <span class="card-name">${stock.name}</span>
                 <span class="card-sub">
                     <span class="badge ${badgeClass}">${badgeLabel}</span>
-                    &nbsp;Est. 1Y: <strong>+${stock.estYearGrowth}%</strong>
+                    &nbsp;Est. 1Y: <strong>${stock.estYearGrowth >= 0 ? '+' : ''}${stock.estYearGrowth}%</strong>
                 </span>
             </div>
             <div class="card-price-block">
@@ -352,7 +359,7 @@ async function fetchOne(symbol) {
 // ── Fetch all stocks ──────────────────────────────────────────────────
 async function fetchAll() {
     btnFetchAll.disabled = true;
-    showStatus('Queuing all 10 stocks — ~2 min to complete (rate limit: 5 req/min)…', 'info', true);
+    showStatus(`Queuing all ${state.stocks.length} stocks — ~${Math.ceil(state.stocks.length * 13 / 60)} min to complete (rate limit: 5 req/min)…`, 'info', true);
 
     try {
         const res  = await fetch('/api/fetch-all', { method: 'POST' });
@@ -373,7 +380,7 @@ function startPolling() {
         const allLoaded = state.stocks.every(s => state.prices[s.symbol]?.length > 0);
         if (allLoaded) {
             stopPolling();
-            showStatus('All 10 stocks loaded!', 'success');
+            showStatus(`All ${state.stocks.length} stocks loaded!`, 'success');
             setTimeout(hideStatus, 4000);
             btnFetchAll.disabled = false;
         }
@@ -457,6 +464,7 @@ async function init() {
     }
 
     state.stocks = data.stocks;
+    $('statTotal').textContent = state.stocks.length;
 
     // Render grid cards
     gridView.innerHTML = '';
@@ -484,7 +492,7 @@ async function init() {
     if (loaded === state.stocks.length) {
         hideStatus();
     } else if (loaded === 0) {
-        showStatus(`No data yet — click "Fetch All Data" to load all 10 stocks from Alpha Vantage.`, 'info');
+        showStatus(`No data yet — click "Fetch All Data" to load all ${state.stocks.length} stocks from Alpha Vantage.`, 'info');
     } else {
         showStatus(`${loaded} of ${state.stocks.length} stocks loaded. Click "Fetch All Data" to get the rest.`, 'info');
     }

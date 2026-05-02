@@ -335,7 +335,7 @@ module.exports = {
     getTranscripts(symbol) {
         return db.prepare(`
             SELECT id, symbol, filed_date, fiscal_year, fiscal_quarter,
-                   title, word_count, has_qa, filing_url, accession
+                   title, word_count, has_qa, source_type, filing_url, accession
             FROM transcripts WHERE symbol=? ORDER BY filed_date DESC
         `).all(symbol);
     },

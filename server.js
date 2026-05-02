@@ -26,6 +26,9 @@ const STOCKS = [
     { symbol: 'MPWR', name: 'Monolithic Power Systems',   subIndustry: 'Semiconductors',                       estYearGrowth: 20  },
     { symbol: 'ADI',  name: 'Analog Devices',             subIndustry: 'Semiconductors',                       estYearGrowth: 15  },
     { symbol: 'QCOM', name: 'Qualcomm',                   subIndustry: 'Semiconductors',                       estYearGrowth: 10  },
+    { symbol: 'SNDK', name: 'Sandisk',                    subIndustry: 'Data Storage',                         estYearGrowth: -11 },
+    { symbol: 'WDC',  name: 'Western Digital',            subIndustry: 'Data Storage',                         estYearGrowth: -25 },
+    { symbol: 'STX',  name: 'Seagate Technology',         subIndustry: 'Data Storage',                         estYearGrowth: -23 },
 ];
 
 const MIME = {
