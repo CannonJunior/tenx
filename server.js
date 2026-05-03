@@ -29,6 +29,64 @@ const STOCKS = [
     { symbol: 'SNDK', name: 'Sandisk',                    subIndustry: 'Data Storage',                         estYearGrowth: -11 },
     { symbol: 'WDC',  name: 'Western Digital',            subIndustry: 'Data Storage',                         estYearGrowth: -25 },
     { symbol: 'STX',  name: 'Seagate Technology',         subIndustry: 'Data Storage',                         estYearGrowth: -23 },
+    { symbol: 'SMH',  name: 'VanEck Semiconductor ETF',   subIndustry: 'ETF',                                  estYearGrowth: 25,  isEtf: true },
+];
+
+// S&P 500 stocks with highest short interest % of float (May 2026), ranked descending
+// Sources: Barchart, MarketBeat, Fintel — confirmed S&P 500 members
+const SHORTLIST = [
+    { symbol: 'CAR',  name: 'Avis Budget Group',           subIndustry: 'Car Rental',           estYearGrowth: -8,  shortPct: 54 },
+    { symbol: 'RH',   name: 'RH (Restoration Hardware)',   subIndustry: 'Luxury Furniture',      estYearGrowth: 12,  shortPct: 32 },
+    { symbol: 'IONQ', name: 'IonQ Inc',                    subIndustry: 'Quantum Computing',     estYearGrowth: 40,  shortPct: 23 },
+    { symbol: 'MRNA', name: 'Moderna',                     subIndustry: 'Biotechnology',         estYearGrowth: -10, shortPct: 20 },
+    { symbol: 'CHTR', name: 'Charter Communications',      subIndustry: 'Cable / Broadband',     estYearGrowth: -5,  shortPct: 17 },
+    { symbol: 'H',    name: 'Hyatt Hotels',                subIndustry: 'Hotels & Resorts',      estYearGrowth: 12,  shortPct: 16 },
+    { symbol: 'CZR',  name: 'Caesars Entertainment',       subIndustry: 'Casinos & Gaming',      estYearGrowth: 8,   shortPct: 16 },
+    { symbol: 'NCLH', name: 'Norwegian Cruise Line',       subIndustry: 'Cruise Lines',          estYearGrowth: 15,  shortPct: 15 },
+    { symbol: 'RIVN', name: 'Rivian Automotive',           subIndustry: 'Electric Vehicles',     estYearGrowth: 30,  shortPct: 14 },
+    { symbol: 'SMCI', name: 'Super Micro Computer',        subIndustry: 'AI Servers',            estYearGrowth: 25,  shortPct: 14 },
+    { symbol: 'CCL',  name: 'Carnival Corporation',        subIndustry: 'Cruise Lines',          estYearGrowth: 14,  shortPct: 13 },
+    { symbol: 'DKNG', name: 'DraftKings',                  subIndustry: 'Sports Betting',        estYearGrowth: 20,  shortPct: 13 },
+    { symbol: 'GPS',  name: 'Gap Inc',                     subIndustry: 'Apparel Retail',        estYearGrowth: -4,  shortPct: 12 },
+    { symbol: 'PVH',  name: 'PVH Corp',                    subIndustry: 'Apparel Brands',        estYearGrowth: 6,   shortPct: 12 },
+    { symbol: 'MGM',  name: 'MGM Resorts International',   subIndustry: 'Casinos & Gaming',      estYearGrowth: 10,  shortPct: 11 },
+    { symbol: 'WBD',  name: 'Warner Bros. Discovery',      subIndustry: 'Streaming / Media',     estYearGrowth: 8,   shortPct: 11 },
+    { symbol: 'UAL',  name: 'United Airlines Holdings',    subIndustry: 'Airlines',              estYearGrowth: 14,  shortPct: 10 },
+    { symbol: 'NKE',  name: 'Nike Inc',                    subIndustry: 'Athletic Apparel',      estYearGrowth: 11,  shortPct: 9  },
+    { symbol: 'LVS',  name: 'Las Vegas Sands',             subIndustry: 'Casinos & Gaming',      estYearGrowth: 14,  shortPct: 8  },
+    { symbol: 'BA',   name: 'Boeing',                      subIndustry: 'Aerospace & Defense',   estYearGrowth: 10,  shortPct: 7  },
+];
+
+// Top 20 S&P 500 stocks by market cap (May 2026, approximate)
+const MARKETCAP = [
+    { symbol: 'AAPL', name: 'Apple Inc',           subIndustry: 'Consumer Electronics', estYearGrowth: 12, marketCapT: 3.2 },
+    { symbol: 'MSFT', name: 'Microsoft',            subIndustry: 'Cloud / Software',     estYearGrowth: 14, marketCapT: 3.0 },
+    { symbol: 'NVDA', name: 'Nvidia',               subIndustry: 'Semiconductors',       estYearGrowth: 27, marketCapT: 2.9 },
+    { symbol: 'AMZN', name: 'Amazon',               subIndustry: 'E-Commerce / Cloud',   estYearGrowth: 20, marketCapT: 2.3 },
+    { symbol: 'GOOGL',name: 'Alphabet (Google)',     subIndustry: 'Search / Cloud / AI',  estYearGrowth: 16, marketCapT: 2.0 },
+    { symbol: 'META', name: 'Meta Platforms',        subIndustry: 'Social Media / AI',    estYearGrowth: 18, marketCapT: 1.6 },
+    { symbol: 'AVGO', name: 'Broadcom',             subIndustry: 'Semiconductors',       estYearGrowth: 41, marketCapT: 1.1 },
+    { symbol: 'LLY',  name: 'Eli Lilly',            subIndustry: 'Pharmaceuticals',      estYearGrowth: 15, marketCapT: 0.95 },
+    { symbol: 'TSLA', name: 'Tesla',                subIndustry: 'Electric Vehicles',    estYearGrowth: 25, marketCapT: 0.82 },
+    { symbol: 'WMT',  name: 'Walmart',              subIndustry: 'Retail',               estYearGrowth: 12, marketCapT: 0.75 },
+    { symbol: 'JPM',  name: 'JPMorgan Chase',       subIndustry: 'Banking',              estYearGrowth: 10, marketCapT: 0.72 },
+    { symbol: 'V',    name: 'Visa',                 subIndustry: 'Payments',             estYearGrowth: 14, marketCapT: 0.62 },
+    { symbol: 'MA',   name: 'Mastercard',           subIndustry: 'Payments',             estYearGrowth: 15, marketCapT: 0.52 },
+    { symbol: 'COST', name: 'Costco Wholesale',      subIndustry: 'Retail',               estYearGrowth: 12, marketCapT: 0.51 },
+    { symbol: 'XOM',  name: 'ExxonMobil',           subIndustry: 'Oil & Gas',            estYearGrowth: 5,  marketCapT: 0.50 },
+    { symbol: 'NFLX', name: 'Netflix',              subIndustry: 'Streaming',            estYearGrowth: 18, marketCapT: 0.42 },
+    { symbol: 'HD',   name: 'Home Depot',           subIndustry: 'Home Improvement',     estYearGrowth: 8,  marketCapT: 0.40 },
+    { symbol: 'ORCL', name: 'Oracle',               subIndustry: 'Cloud / Databases',    estYearGrowth: 20, marketCapT: 0.40 },
+    { symbol: 'UNH',  name: 'UnitedHealth Group',   subIndustry: 'Health Insurance',     estYearGrowth: 10, marketCapT: 0.38 },
+    { symbol: 'ABBV', name: 'AbbVie',               subIndustry: 'Biopharmaceuticals',   estYearGrowth: 8,  marketCapT: 0.35 },
+];
+
+// S&P 500 stocks that ≥100% in past 12 months (May 2025–May 2026), not already in STOCKS
+const WATCHLIST = [
+    { symbol: 'INTC', name: 'Intel Corporation',     subIndustry: 'Semiconductors',    estYearGrowth: 35, gain12m: 356 },
+    { symbol: 'TER',  name: 'Teradyne',              subIndustry: 'Semicond. Test',    estYearGrowth: 28, gain12m: 366 },
+    { symbol: 'PLTR', name: 'Palantir Technologies', subIndustry: 'Software / AI',     estYearGrowth: 22, gain12m: 290 },
+    { symbol: 'APP',  name: 'AppLovin Corporation',  subIndustry: 'AI Advertising',    estYearGrowth: 18, gain12m: 275 },
 ];
 
 const MIME = {
@@ -145,6 +203,39 @@ const server = http.createServer(async (req, res) => {
             sector: 'Information Technology',
             subSector: 'Semiconductors',
             stocks: STOCKS.map(s => ({
+                ...s,
+                hasData: db.hasPrices(s.symbol),
+                fetchLog: db.getFetchLog(s.symbol),
+            })),
+        });
+        return;
+    }
+
+    if (pathname === '/api/watchlist') {
+        json(res, {
+            watchlist: WATCHLIST.map(s => ({
+                ...s,
+                hasData: db.hasPrices(s.symbol),
+                fetchLog: db.getFetchLog(s.symbol),
+            })),
+        });
+        return;
+    }
+
+    if (pathname === '/api/shortlist') {
+        json(res, {
+            shortlist: SHORTLIST.map(s => ({
+                ...s,
+                hasData: db.hasPrices(s.symbol),
+                fetchLog: db.getFetchLog(s.symbol),
+            })),
+        });
+        return;
+    }
+
+    if (pathname === '/api/marketcap') {
+        json(res, {
+            marketcap: MARKETCAP.map(s => ({
                 ...s,
                 hasData: db.hasPrices(s.symbol),
                 fetchLog: db.getFetchLog(s.symbol),

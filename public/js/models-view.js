@@ -131,18 +131,35 @@ const ModelView = {
             return `<span style="color:${color};font-weight:700">${'⚡'.repeat(Math.min(v,4))} ${v}</span>`;
         };
 
+        const stockMetaMap = Object.fromEntries(
+            (typeof state !== 'undefined' ? state.stocks : []).map(s => [s.symbol, s])
+        );
+
         return `
         <div class="scanner-wrap">
             <table class="scanner-table">
                 <thead><tr>
                     <th>Symbol</th><th>Score</th><th>Conf.</th>
                     <th>RSI</th><th>MACD</th><th>Volume</th><th>Peer Rank</th>
-                    <th>OBV(4w)</th><th>vs 200w</th><th>Price</th>
+                    <th>OBV(4w)</th><th>vs 200w</th><th>Price</th><th>Est. 1Y Target</th>
                 </tr></thead>
                 <tbody>
-                ${rows.map(r => `
+                ${rows.map(r => {
+                    const meta = stockMetaMap[r.symbol];
+                    const eg   = meta?.estYearGrowth;
+                    const targetPrice = r.close != null && eg != null ? r.close * (1 + eg / 100) : null;
+                    const fmtTarget = targetPrice != null
+                        ? `<span class="${eg >= 0 ? 'positive' : 'negative'}">$${targetPrice.toFixed(2)}</span>
+                           <small class="text3"> ${eg >= 0 ? '+' : ''}${eg}%</small>`
+                        : '—';
+                    const isEtf = meta?.isEtf;
+                    const symLabel = isEtf
+                        ? `<span class="scan-sym" style="color:${COLORS[r.symbol]||'#FFDD57'}">${r.symbol}</span>
+                           <span class="badge badge-etf" style="font-size:9px;padding:1px 5px;margin-left:4px">ETF</span>`
+                        : `<span class="scan-sym" style="color:${COLORS[r.symbol]||'#58A6FF'}">${r.symbol}</span>`;
+                    return `
                 <tr class="scanner-row ${r.symbol===this.activeSymbol?'active':''}" data-sym="${r.symbol}">
-                    <td><span class="scan-sym" style="color:${COLORS[r.symbol]||'#58A6FF'}">${r.symbol}</span></td>
+                    <td>${symLabel}</td>
                     <td>${scoreBar(r.score)}</td>
                     <td>${fmtConf(r.confluence)}</td>
                     <td>${fmtRSI(r.rsi)}</td>
@@ -152,7 +169,9 @@ const ModelView = {
                     <td>${fmtOBV(r.obv_roc4)}</td>
                     <td>${fmtMA(r.dist_200w)}</td>
                     <td>$${r.close?.toFixed(2)??'—'}</td>
-                </tr>`).join('')}
+                    <td>${fmtTarget}</td>
+                </tr>`;
+                }).join('')}
                 </tbody>
             </table>
         </div>`;

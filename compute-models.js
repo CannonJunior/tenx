@@ -5,7 +5,7 @@ require('dotenv').config();
 const db = require('./database');
 const { computeAllModels, backtestStats } = require('./models');
 
-const SYMBOLS = ['MU', 'KLAC', 'AMD', 'AVGO', 'NVDA', 'LRCX', 'AMAT', 'MPWR', 'ADI', 'QCOM'];
+const SYMBOLS = ['MU', 'KLAC', 'AMD', 'AVGO', 'NVDA', 'LRCX', 'AMAT', 'MPWR', 'ADI', 'QCOM', 'SNDK', 'WDC', 'STX', 'SMH'];
 
 async function computeAndStore() {
     console.log('[models] Loading price data...');

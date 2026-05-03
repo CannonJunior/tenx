@@ -57,8 +57,12 @@
 </div>
 
 <main id="mainContent">
-    <!-- Grid view -->
-    <div id="gridView" class="charts-grid"></div>
+    <!-- Grid view + draggable side panel columns -->
+    <div id="gridViewWrap" class="grid-view-wrap">
+        <div id="leftCol"  class="panel-col" data-col="left"></div>
+        <div id="gridView" class="charts-grid"></div>
+        <div id="rightCol" class="panel-col" data-col="right"></div>
+    </div>
 
     <!-- Comparison view (hidden by default) -->
     <div id="compareView" class="compare-view hidden">

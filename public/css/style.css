@@ -171,10 +171,147 @@ html, body {
 /* ── Grid View ── */
 #mainContent { padding: 20px 24px; }
 
+.grid-view-wrap {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+}
+
 .charts-grid {
+    flex: 1;
+    min-width: 0;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
     gap: 16px;
+}
+
+/* ── Panel columns (left / right of center grid) ── */
+.panel-col {
+    width: 290px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 72px;
+    max-height: calc(100vh - 92px);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+}
+
+/* Empty drop zone placeholder */
+.panel-col.col-empty {
+    min-height: 120px;
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    align-items: center;
+    justify-content: center;
+}
+.panel-col.col-empty::before {
+    content: 'Drop a panel here';
+    font-size: 11px;
+    color: var(--text3);
+    text-align: center;
+    padding: 16px;
+}
+
+/* Drag-over highlight */
+.panel-col.drag-over {
+    outline: 2px dashed var(--accent);
+    outline-offset: 4px;
+    border-radius: var(--radius);
+    background: rgba(88,166,255,0.03);
+}
+
+/* Drop position indicator line */
+.drop-line {
+    height: 2px;
+    background: var(--accent);
+    border-radius: 1px;
+    margin: 0 4px;
+    pointer-events: none;
+}
+
+/* ── Panel widget (draggable card group) ── */
+.panel-widget {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: box-shadow 0.15s, opacity 0.15s;
+}
+.panel-widget.dragging { opacity: 0.4; }
+
+.panel-widget-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px 9px 0;
+    border-bottom: 1px solid var(--border);
+    border-left: 3px solid transparent;
+    cursor: default;
+    user-select: none;
+}
+
+.panel-drag-handle {
+    font-size: 16px;
+    color: var(--text3);
+    cursor: grab;
+    padding: 0 4px 0 10px;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: color 0.1s;
+}
+.panel-drag-handle:hover { color: var(--text2); }
+.panel-drag-handle:active { cursor: grabbing; }
+
+.panel-widget-titleblock {
+    flex: 1;
+    min-width: 0;
+}
+.panel-widget-title {
+    display: block;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: 0.1px;
+}
+.panel-widget-sub {
+    display: block;
+    font-size: 10px;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-top: 1px;
+}
+
+.panel-collapse-btn {
+    background: none;
+    border: none;
+    color: var(--text3);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    line-height: 1;
+    transition: background 0.1s, color 0.1s;
+}
+.panel-collapse-btn:hover { background: var(--bg3); color: var(--text); }
+
+.panel-widget-body {
+    max-height: 520px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+}
+
+.panel-card-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
 }
 
 /* ── Chart Card ── */
@@ -230,6 +367,13 @@ html, body {
     font-size: 12px;
     font-weight: 500;
     margin-top: 3px;
+}
+
+.card-target {
+    font-size: 11px;
+    font-weight: 500;
+    margin-top: 3px;
+    opacity: 0.85;
 }
 .positive { color: var(--green); }
 .negative { color: var(--red); }
@@ -287,6 +431,10 @@ html, body {
 .badge-semi    { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
 .badge-equip   { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
 .badge-storage { background: rgba(52, 211, 153, 0.15); color: #34D399; }
+.badge-etf     { background: rgba(255, 221, 87, 0.15); color: #FFDD57; }
+.badge-hot     { background: rgba(63, 185, 80, 0.18);  color: var(--green); font-weight: 700; }
+.badge-short     { background: rgba(248, 81, 73, 0.18);  color: var(--red);     font-weight: 700; }
+.badge-marketcap { background: rgba(86, 204, 242, 0.15); color: #56CCF2;        font-weight: 700; }
 
 /* ── Compare View ── */
 .compare-view { }
@@ -550,12 +698,42 @@ html, body {
 }
 
 /* ── Responsive ── */
+@media (max-width: 1600px) {
+    .panel-col { width: 265px; }
+}
+
+@media (max-width: 1350px) {
+    .panel-col { width: 240px; }
+}
+
+@media (max-width: 1150px) {
+    .grid-view-wrap { flex-wrap: wrap; }
+    .panel-col {
+        width: 100%;
+        position: static;
+        max-height: none;
+        order: 2;
+    }
+    .charts-grid { order: 1; width: 100%; }
+    /* Panel cards flow in a grid when column goes full-width */
+    .panel-card-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 12px;
+    }
+}
+
 @media (max-width: 900px) {
     .header { flex-wrap: wrap; gap: 10px; }
     .stats-row { flex-wrap: wrap; }
     .stat-card { flex: 1 1 calc(50% - 1px); }
     #mainContent { padding: 16px; }
     .compare-chart-wrap { height: 340px; }
+}
+
+@media (max-width: 520px) {
+    .charts-grid { grid-template-columns: 1fr; }
+    .stat-card   { flex: 1 1 100%; }
 }
 
 @media (max-width: 520px) {
