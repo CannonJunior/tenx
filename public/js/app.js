@@ -14,7 +14,10 @@ const COLORS = {
     SNDK: '#A78BFA',
     WDC:  '#34D399',
     STX:  '#FB923C',
-    SMH:  '#FFDD57',
+    SMH:   '#FFDD57',
+    HXSCL: '#EA580C',
+    TSM:   '#2563EB',
+    VRT:   '#059669',
     // Watchlist doublers
     INTC: '#0071C5',
     TER:  '#E05C2A',
@@ -62,12 +65,107 @@ const COLORS = {
     ABBV: '#023C91',
 };
 
+// ── Data freshness helpers ────────────────────────────────────────────
+function getFreshnessColor(stock) {
+    const s = typeof settings !== 'undefined' ? settings : {};
+    if (!stock?.hasData || !stock.fetchLog?.last_fetched)
+        return s.freshnessStaleColor ?? '#EF4444';
+    const ageH = (Date.now() - new Date(stock.fetchLog.last_fetched).getTime()) / 3600000;
+    if (ageH <= (s.freshnessT1Hours ?? 24))  return s.freshnessT1Color ?? '#3B82F6';
+    if (ageH <= (s.freshnessT2Hours ?? 48))  return s.freshnessT2Color ?? '#22C55E';
+    if (ageH <= (s.freshnessT3Hours ?? 120)) return s.freshnessT3Color ?? '#EAB308';
+    return s.freshnessStaleColor ?? '#EF4444';
+}
+
+function isStaleFetch(stock) {
+    if (!stock?.hasData || !stock.fetchLog?.last_fetched) return false;
+    const s = typeof settings !== 'undefined' ? settings : {};
+    const ageH = (Date.now() - new Date(stock.fetchLog.last_fetched).getTime()) / 3600000;
+    return ageH > (s.freshnessT3Hours ?? 120);
+}
+
+function buildAgeText(stock) {
+    if (!stock?.fetchLog?.last_fetched) return '';
+    const ageH = (Date.now() - new Date(stock.fetchLog.last_fetched).getTime()) / 3600000;
+    return ageH < 24
+        ? `Data: ${Math.round(ageH)}h ago`
+        : `Data: ${(ageH / 24).toFixed(1)}d ago`;
+}
+
+function updateCardFreshness(symbol, ctx = '') {
+    const sid  = ctx + symbol;
+    const card = $(`card-${sid}`);
+    if (!card) return;
+    const allStocks = [...state.stocks, ...Object.values(state.panels).flat()];
+    const stock = allStocks.find(s => s.symbol === symbol);
+    if (!stock) return;
+    card.style.borderTopColor = getFreshnessColor(stock);
+    const staleBanner = $(`stale-${sid}`);
+    if (!staleBanner) return;
+    if (isStaleFetch(stock)) {
+        const ageEl = staleBanner.querySelector('.stale-age');
+        if (ageEl) ageEl.textContent = buildAgeText(stock);
+        staleBanner.classList.remove('hidden');
+    } else {
+        staleBanner.classList.add('hidden');
+    }
+}
+
+function updateStockFetchLog(symbol, rowCount) {
+    const now = new Date().toISOString();
+    const allStocks = [...state.stocks, ...Object.values(state.panels).flat()];
+    for (const s of allStocks) {
+        if (s.symbol === symbol) {
+            s.fetchLog = { symbol, last_fetched: now, status: 'success', row_count: rowCount };
+            s.hasData = true;
+        }
+    }
+}
+
+function refreshAllFreshnessBorders() {
+    for (const stock of state.stocks) updateCardFreshness(stock.symbol);
+    for (const [name, items] of Object.entries(state.panels)) {
+        for (const stock of items) updateCardFreshness(stock.symbol, name + '_');
+    }
+}
+
 // hex → rgba helper
 function rgba(hex, alpha) {
     const r = parseInt(hex.slice(1,3),16);
     const g = parseInt(hex.slice(3,5),16);
     const b = parseInt(hex.slice(5,7),16);
     return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// ── Growth-based color helpers ────────────────────────────────────────
+function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => {
+        const k = (n + h / 30) % 12;
+        const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+        return Math.round(255 * c).toString(16).padStart(2, '0');
+    };
+    return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+function getGlobalMaxGrowth() {
+    const all = [...(state.stocks || []), ...Object.values(state.panels || {}).flat()];
+    const vals = all.map(s => s.estYearGrowth).filter(g => g != null && g > 0);
+    return vals.length ? Math.max(...vals) : 1;
+}
+
+// Maps estYearGrowth → hex color on a red–grey–green scale.
+// negative → darker-to-brighter red, 0 → grey, positive → darker-to-brighter green.
+// The stock with the highest estYearGrowth always gets the brightest green.
+function getGrowthColor(growth) {
+    if (growth == null || growth === 0) return '#888888';
+    if (growth < 0) {
+        const t = Math.min(Math.abs(growth) / 50, 1); // -50% → t=1
+        return hslToHex(0, Math.round(55 + t * 45), Math.round(30 + t * 20));
+    }
+    const t = Math.min(growth / getGlobalMaxGrowth(), 1);
+    return hslToHex(120, Math.round(40 + t * 60), Math.round(26 + t * 29));
 }
 
 const state = {
@@ -112,9 +210,15 @@ const btnCompare   = $('btnCompare');
 // ── Status banner ─────────────────────────────────────────────────────
 function showStatus(msg, type = 'info', spin = false) {
     statusBanner.className = `status-banner ${type}`;
-    statusBanner.innerHTML = spin
-        ? `<div class="spinner-inline"></div><span>${msg}</span>`
-        : msg;
+    statusBanner.innerHTML = '';
+    if (spin) {
+        const spinner = document.createElement('div');
+        spinner.className = 'spinner-inline';
+        statusBanner.appendChild(spinner);
+    }
+    const text = document.createElement('span');
+    text.textContent = msg;
+    statusBanner.appendChild(text);
 }
 function hideStatus() { statusBanner.classList.add('hidden'); }
 
@@ -164,8 +268,11 @@ function updateStats() {
 }
 
 // ── Build a chart card (no-data state) ───────────────────────────────
-function buildCard(stock) {
-    const color = COLORS[stock.symbol] || '#58A6FF';
+// ctx prefixes every element ID so the same symbol can appear in multiple
+// sections without colliding — state.prices[symbol] remains a shared source.
+function buildCard(stock, ctx = '') {
+    const sid   = ctx + stock.symbol;          // scoped ID token
+    const color = getGrowthColor(stock.estYearGrowth);
     const est1y = `Est. 1Y: <strong>${stock.estYearGrowth >= 0 ? '+' : ''}${stock.estYearGrowth}%</strong>`;
     const badgeClass = stock.shortPct    != null               ? 'badge-short'
                      : stock.gain12m    != null                ? 'badge-hot'
@@ -186,10 +293,13 @@ function buildCard(stock) {
                   : stock.marketCapT != null  ? `&nbsp;Mkt Cap &nbsp;·&nbsp; ${est1y}`
                   :                            `&nbsp;${est1y}`;
 
+    const freshnessColor = getFreshnessColor(stock);
+    const staleNow       = isStaleFetch(stock);
+
     const card = document.createElement('div');
     card.className = 'chart-card';
-    card.id = `card-${stock.symbol}`;
-    card.style.borderTopColor = color;
+    card.id = `card-${sid}`;
+    card.style.borderTopColor = freshnessColor;
     card.style.borderTopWidth = '3px';
 
     card.innerHTML = `
@@ -203,47 +313,72 @@ function buildCard(stock) {
                 </span>
             </div>
             <div class="card-price-block">
-                <div class="card-price" id="price-${stock.symbol}">—</div>
-                <div class="card-change neutral" id="chg-${stock.symbol}">—</div>
-                <div class="card-target neutral" id="target-${stock.symbol}"></div>
+                <div class="card-price" id="price-${sid}">—</div>
+                <div class="card-change neutral" id="chg-${sid}">—</div>
+                <div class="card-target neutral" id="target-${sid}"></div>
             </div>
         </div>
-        <div id="body-${stock.symbol}">
+        <div id="body-${sid}">
             <div class="card-no-data">
                 <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3v18h18"/><polyline points="7 16 11 12 14 15 20 9"/></svg>
                 No data loaded
-                <button class="fetch-btn" id="fetchBtn-${stock.symbol}" onclick="fetchOne('${stock.symbol}')">
+                <button class="fetch-btn" id="fetchBtn-${sid}" onclick="fetchOne('${stock.symbol}')">
                     Fetch ${stock.symbol}
                 </button>
             </div>
         </div>
-        <div class="card-footer">
-            <span id="range-${stock.symbol}">—</span>
-            <span id="pts-${stock.symbol}"></span>
+        <div id="stale-${sid}" class="card-stale-banner${staleNow ? '' : ' hidden'}">
+            <span class="stale-age">${buildAgeText(stock)}</span>
+            <button class="fetch-btn" onclick="fetchOne('${stock.symbol}')">
+                ↻ Fetch ${stock.symbol}
+            </button>
         </div>
+        <div class="card-footer">
+            <span id="range-${sid}">—</span>
+            <span id="pts-${sid}"></span>
+        </div>
+        ${typeof buildAdvancedSection === 'function' ? buildAdvancedSection(stock, sid) : ''}
     `;
+
+    // Double-click anywhere on the card (but not on buttons/links) opens a floating copy
+    card.addEventListener('dblclick', e => {
+        if (e.target.closest('button, a, .adv-section, select, input')) return;
+        if (typeof FloatingCards !== 'undefined') FloatingCards.open(stock, sid);
+    });
+
     return card;
 }
 
 // ── Render chart inside a card ────────────────────────────────────────
-function renderCardChart(symbol) {
-    const prices = state.prices[symbol];
-    if (!prices?.length) return;
+function renderCardChart(symbol, ctx = '') {
+    const allPrices = state.prices[symbol];
+    if (!allPrices?.length) return;
 
-    const color = COLORS[symbol] || '#58A6FF';
-    const body  = $(`body-${symbol}`);
+    // Apply data-window setting (filter client-side from stored 24M)
+    const windowMonths = (typeof settings !== 'undefined') ? settings.dataWindow : 24;
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - windowMonths);
+    const cutStr = cutoff.toISOString().split('T')[0];
+    const prices = allPrices.filter(p => p.date >= cutStr);
+    if (!prices.length) return;
 
-    // Replace no-data content with canvas
-    body.innerHTML = `<div class="card-canvas-wrap"><canvas id="canvas-${symbol}"></canvas></div>`;
-    const canvas = $(`canvas-${symbol}`);
+    const sid   = ctx + symbol;
+    const allStocks = [...state.stocks, ...Object.values(state.panels).flat()];
+    const stock = allStocks.find(s => s.symbol === symbol);
+    const color = getGrowthColor(stock?.estYearGrowth);
+    const body  = $(`body-${sid}`);
+    if (!body) return;
 
-    // Destroy old chart if exists
-    if (state.charts[symbol]) { state.charts[symbol].destroy(); }
+    body.innerHTML = `<div class="card-canvas-wrap"><canvas id="canvas-${sid}"></canvas></div>`;
+    const canvas = $(`canvas-${sid}`);
+
+    if (state.charts[sid]) { state.charts[sid].destroy(); }
 
     const labels = prices.map(p => new Date(p.date));
     const values = prices.map(p => p.close);
 
-    state.charts[symbol] = new Chart(canvas, {
+    const doFill = (typeof settings !== 'undefined') ? settings.chartFill : true;
+    state.charts[sid] = new Chart(canvas, {
         type: 'line',
         data: {
             labels,
@@ -254,7 +389,7 @@ function renderCardChart(symbol) {
                 borderWidth: 1.5,
                 pointRadius: 0,
                 pointHoverRadius: 4,
-                fill: true,
+                fill: doFill,
                 tension: 0.1,
             }]
         },
@@ -304,29 +439,30 @@ function renderCardChart(symbol) {
     // Update price / change labels
     const last   = values[values.length - 1];
     const change = calcChange(prices);
-    $(`price-${symbol}`).textContent = fmt(last);
-    const chgEl = $(`chg-${symbol}`);
+    $(`price-${sid}`).textContent = fmt(last);
+    const chgEl = $(`chg-${sid}`);
     chgEl.textContent = pct(change);
     chgEl.className   = 'card-change ' + cls(change);
 
     // 1-year target price
-    const stock = state.stocks.find(s => s.symbol === symbol);
     if (stock?.estYearGrowth != null && last) {
         const targetPrice = last * (1 + stock.estYearGrowth / 100);
-        const targetEl = $(`target-${symbol}`);
+        const targetEl = $(`target-${sid}`);
         if (targetEl) {
             targetEl.textContent = `1Y: ${fmt(targetPrice)}`;
-            targetEl.className = 'card-target ' + cls(stock.estYearGrowth);
-            targetEl.title = `1-year target: ${fmt(targetPrice)} (${stock.estYearGrowth >= 0 ? '+' : ''}${stock.estYearGrowth}% estimate)`;
+            targetEl.className   = 'card-target ' + cls(stock.estYearGrowth);
+            targetEl.title       = `1-year target: ${fmt(targetPrice)} (${stock.estYearGrowth >= 0 ? '+' : ''}${stock.estYearGrowth}% estimate)`;
         }
     }
 
     // Footer
-    const first = prices[0].date;
-    const end   = prices[prices.length-1].date;
-    const fmtDate = d => new Date(d).toLocaleDateString('en-US',{month:'short',year:'2-digit'});
-    $(`range-${symbol}`).textContent = `${fmtDate(first)} – ${fmtDate(end)}`;
-    $(`pts-${symbol}`).textContent   = `${prices.length} days`;
+    const first   = prices[0].date;
+    const end     = prices[prices.length - 1].date;
+    const fmtDate = d => new Date(d).toLocaleDateString('en-US', {month:'short', year:'2-digit'});
+    $(`range-${sid}`).textContent = `${fmtDate(first)} – ${fmtDate(end)}`;
+    $(`pts-${sid}`).textContent   = `${prices.length} days`;
+
+    updateCardFreshness(symbol, ctx);
 }
 
 // ── Compare chart ─────────────────────────────────────────────────────
@@ -340,11 +476,17 @@ function renderCompareChart() {
         return;
     }
 
+    const winMonths = (typeof settings !== 'undefined') ? settings.dataWindow : 24;
+    const winCutoff = new Date();
+    winCutoff.setMonth(winCutoff.getMonth() - winMonths);
+    const winCutStr = winCutoff.toISOString().split('T')[0];
+
     const datasets = loaded.map(stock => {
-        const prices = state.prices[stock.symbol];
+        const prices = state.prices[stock.symbol].filter(p => p.date >= winCutStr);
+        if (!prices.length) return null;
         const base   = prices[0].close;
         const data   = prices.map(p => ({ x: new Date(p.date), y: (p.close / base) * 100 }));
-        const color  = COLORS[stock.symbol] || '#58A6FF';
+        const color  = getGrowthColor(stock.estYearGrowth);
         const isEtf  = stock.isEtf;
         return {
             label: stock.symbol,
@@ -358,7 +500,7 @@ function renderCompareChart() {
             tension: 0.1,
             order: isEtf ? 0 : 1,
         };
-    });
+    }).filter(Boolean);
 
     state.compareChart = new Chart(canvas, {
         type: 'line',
@@ -414,7 +556,7 @@ function renderCompareChart() {
     // Legend
     $('compareLegend').innerHTML = loaded.map(stock => {
         const change = calcChange(state.prices[stock.symbol]);
-        const color  = COLORS[stock.symbol] || '#58A6FF';
+        const color  = getGrowthColor(stock.estYearGrowth);
         const swatchStyle = stock.isEtf
             ? `background:transparent;border-bottom:2.5px dashed ${color};`
             : `background:${color};`;
@@ -433,8 +575,9 @@ function renderCompareChart() {
 }
 
 // ── Fetch a single stock ──────────────────────────────────────────────
-async function fetchOne(symbol) {
-    const btn = $(`fetchBtn-${symbol}`);
+async function fetchOne(symbol, ctx = '') {
+    const sid = ctx + symbol;
+    const btn = $(`fetchBtn-${sid}`);
     if (btn) { btn.disabled = true; btn.textContent = 'Fetching…'; }
     showStatus(`Fetching ${symbol} from Alpha Vantage…`, 'info', true);
 
@@ -447,8 +590,9 @@ async function fetchOne(symbol) {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
 
+        updateStockFetchLog(symbol, data.count);
         await loadPrices(symbol);
-        renderCardChart(symbol);
+        renderCardChart(symbol, ctx);
         updateStats();
         if (state.view === 'compare') renderCompareChart();
         showStatus(`${symbol} loaded — ${data.count} trading days`, 'success');
@@ -509,10 +653,16 @@ async function refreshStockStatus() {
 }
 
 // ── Load prices for a symbol from API ────────────────────────────────
+const _priceInflight = new Map();
+
 async function loadPrices(symbol) {
-    const res  = await fetch(`/api/prices?symbol=${symbol}`);
-    const data = await res.json();
-    state.prices[symbol] = data.prices || [];
+    if (_priceInflight.has(symbol)) return _priceInflight.get(symbol);
+    const req = fetch(`/api/prices?symbol=${symbol}`)
+        .then(r => r.json())
+        .then(data => { state.prices[symbol] = data.prices || []; })
+        .finally(() => _priceInflight.delete(symbol));
+    _priceInflight.set(symbol, req);
+    return req;
 }
 
 // ── View toggle ───────────────────────────────────────────────────────
@@ -553,27 +703,6 @@ btnFetchAll.addEventListener('click', fetchAll);
 
 // ── Panel system: fetch / render / collapse / drag-drop ───────────────
 
-async function fetchPanelOne(symbol) {
-    const btn = $(`fetchBtn-${symbol}`);
-    if (btn) { btn.disabled = true; btn.textContent = 'Fetching…'; }
-    showStatus(`Fetching ${symbol}…`, 'info', true);
-    try {
-        const res = await fetch('/api/fetch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ symbol }),
-        });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        await loadPrices(symbol);
-        renderCardChart(symbol);
-        showStatus(`${symbol} loaded — ${data.count} data points`, 'success');
-        setTimeout(hideStatus, 3000);
-    } catch (err) {
-        showStatus(`Failed to fetch ${symbol}: ${err.message}`, 'error');
-        if (btn) { btn.disabled = false; btn.textContent = `Retry ${symbol}`; }
-    }
-}
 
 async function loadPanelData(name) {
     const def = PANEL_DEFS[name];
@@ -588,15 +717,17 @@ async function loadPanelData(name) {
 function renderPanelCards(name) {
     const grid = $(`panel-grid-${name}`);
     if (!grid) return;
+    const ctx = name + '_';           // e.g. 'marketcap_' — scopes all IDs for this panel
     grid.innerHTML = '';
     for (const stock of (state.panels[name] || [])) {
-        const card = buildCard(stock);
-        const btn  = card.querySelector('.fetch-btn');
-        if (btn) btn.setAttribute('onclick', `fetchPanelOne('${stock.symbol}')`);
+        const card = buildCard(stock, ctx);
+        card.querySelectorAll('.fetch-btn').forEach(btn => {
+            btn.setAttribute('onclick', `fetchOne('${stock.symbol}', '${ctx}')`);
+        });
         grid.appendChild(card);
     }
     for (const stock of (state.panels[name] || [])) {
-        if (state.prices[stock.symbol]?.length > 0) renderCardChart(stock.symbol);
+        if (state.prices[stock.symbol]?.length > 0) renderCardChart(stock.symbol, ctx);
     }
 }
 
@@ -723,10 +854,14 @@ function setupColumnDrop(col, colName) {
         }
 
         savePanelConfig();
-        renderPanels();
-        for (const n of [...(panelConfig.columns.left || []), ...(panelConfig.columns.right || [])]) {
-            renderPanelCards(n);
+
+        // Move the existing widget node into position — no rebuild, charts survive
+        const widget = $(`pw-${name}`);
+        if (widget) {
+            if (afterEl) col.insertBefore(widget, afterEl);
+            else         col.appendChild(widget);
         }
+        updateEmptyColumns();
     });
 }
 

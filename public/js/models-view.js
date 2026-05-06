@@ -29,9 +29,12 @@ const ModelView = {
     data:              null,
     regimeData:        null,
     detail:            null,
-    transcriptSignals: {},   // { symbol: [...] } cached per symbol
+    transcriptSignals: {},
     detailCharts:      [],
     activeSymbol:      null,
+    transcriptPoll:    null,
+    _metaMap:          null,
+    sort:              { col: 'score', dir: 'desc' },   // default sort
 
     async init() {
         await Promise.all([this.load(), this.loadRegime()]);
@@ -41,11 +44,86 @@ const ModelView = {
     async load() {
         try { this.data = await fetch('/api/models').then(r => r.json()); }
         catch { this.data = { hasModels: false }; }
+        this._metaMap = null; // invalidate cache after any data reload
     },
 
     async loadRegime() {
         try { this.regimeData = await fetch('/api/backtest-regime').then(r => r.json()); }
         catch { this.regimeData = {}; }
+    },
+
+    // ── metaMap: symbol → stock object, built once per load ──────────
+    getMetaMap() {
+        if (!this._metaMap) {
+            const all = typeof state !== 'undefined'
+                ? [...state.stocks, ...Object.values(state.panels).flat()] : [];
+            this._metaMap = new Map(all.map(s => [s.symbol, s]));
+        }
+        return this._metaMap;
+    },
+
+    // ── Sort helpers ──────────────────────────────────────────────────
+    setSort(col) {
+        if (this.sort.col === col) {
+            this.sort.dir = this.sort.dir === 'desc' ? 'asc' : 'desc';
+        } else {
+            this.sort.col = col;
+            // Numeric columns default desc (higher = more interesting).
+            // Symbol sorts asc first (alphabetical).
+            this.sort.dir = col === 'symbol' ? 'asc' : 'desc';
+        }
+        this.refreshScanner();
+    },
+
+    _sortVal(row, col) {
+        const meta = this.getMetaMap().get(row.symbol);
+        const NULL = col === 'symbol' ? 'zzz' : -Infinity;
+        switch (col) {
+            case 'symbol':    return row.symbol ?? NULL;
+            case 'score':     return row.score       ?? NULL;
+            case 'conf':      return row.confluence  ?? NULL;
+            case 'rsi':       return row.rsi         ?? NULL;
+            case 'macd':      return row.macd_hist   ?? NULL;
+            case 'volume':    return row.vol_ratio   ?? NULL;
+            case 'peer_rank': return row.peer_rank   ?? NULL;
+            case 'obv':       return row.obv_roc4    ?? NULL;
+            case 'ma200':     return row.dist_200w   ?? NULL;
+            case 'price':     return row.close       ?? NULL;
+            case 'target':    return meta?.estYearGrowth ?? NULL;
+            default:          return NULL;
+        }
+    },
+
+    getSortedRows() {
+        const rows  = (this.data?.indicators || []).slice();
+        const { col, dir } = this.sort;
+        rows.sort((a, b) => {
+            const av = this._sortVal(a, col);
+            const bv = this._sortVal(b, col);
+            if (av === bv) return 0;
+            if (col === 'symbol') {
+                return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+            }
+            return dir === 'desc' ? bv - av : av - bv;
+        });
+        return rows;
+    },
+
+    // Rebuild only the <thead> sort indicators and <tbody> rows in-place.
+    refreshScanner() {
+        // Update header chevrons
+        document.querySelectorAll('.scanner-table th[data-col]').forEach(th => {
+            const active = th.dataset.col === this.sort.col;
+            th.classList.toggle('sort-active', active);
+            const ind = th.querySelector('.sort-ind');
+            if (ind) ind.textContent = active ? (this.sort.dir === 'asc' ? '▲' : '▼') : '';
+        });
+        // Rebuild tbody
+        const tbody = document.querySelector('.scanner-table tbody');
+        if (!tbody) return;
+        tbody.innerHTML = this.renderScannerRows(this.getSortedRows());
+        tbody.querySelectorAll('.scanner-row[data-sym]').forEach(row =>
+            row.addEventListener('click', () => this.loadDetail(row.dataset.sym)));
     },
 
     // ── Master render ─────────────────────────────────────────────────
@@ -98,19 +176,56 @@ const ModelView = {
         document.querySelectorAll('.scanner-row[data-sym]').forEach(row =>
             row.addEventListener('click', () => this.loadDetail(row.dataset.sym)));
 
+        // Sortable column headers
+        document.querySelectorAll('.scanner-table th[data-col]').forEach(th =>
+            th.addEventListener('click', () => this.setSort(th.dataset.col)));
+
         if (this.activeSymbol) {
             this.loadDetail(this.activeSymbol);
         } else if (this.data.indicators?.length) {
-            const top = [...this.data.indicators].sort((a, b) => (b.score||0) - (a.score||0))[0];
-            if (top) setTimeout(() => this.loadDetail(top.symbol), 50);
+            const top = this.getSortedRows()[0];
+            if (top) this.loadDetail(top.symbol);
         }
     },
 
     // ── Scanner table ─────────────────────────────────────────────────
     renderScanner() {
-        const rows = (this.data.indicators || []).sort((a, b) => (b.score||0) - (a.score||0));
-        if (!rows.length) return '<div class="model-empty">No indicator data</div>';
+        if (!(this.data?.indicators?.length)) return '<div class="model-empty">No indicator data</div>';
 
+        // Column definitions: [key, label, title]
+        const COLS = [
+            ['symbol',    'Symbol',         'Sort alphabetically'],
+            ['score',     'Score',          'Breakout score 0–100'],
+            ['conf',      'Conf.',          'Signal confluence (distinct types in 4w window)'],
+            ['rsi',       'RSI',            'RSI(14)'],
+            ['macd',      'MACD',           'MACD histogram direction'],
+            ['volume',    'Volume',         'Volume ratio vs 10-week average'],
+            ['peer_rank', 'Peer Rank',      'Relative 8-week return rank among peers'],
+            ['obv',       'OBV(4w)',        'On-balance volume rate-of-change, 4 weeks'],
+            ['ma200',     'vs 200w',        'Price distance from 200-week SMA'],
+            ['price',     'Price',          'Latest closing price'],
+            ['target',    'Est. 1Y Target', 'Target price from analyst 1-year estimate'],
+        ];
+
+        const th = ([key, label, title]) => {
+            const active = this.sort.col === key;
+            const ind    = active ? (this.sort.dir === 'asc' ? '▲' : '▼') : '';
+            return `<th data-col="${key}" class="sortable-th${active ? ' sort-active' : ''}" title="${title}">
+                ${label}<span class="sort-ind">${ind}</span>
+            </th>`;
+        };
+
+        return `
+        <div class="scanner-wrap">
+            <table class="scanner-table">
+                <thead><tr>${COLS.map(th).join('')}</tr></thead>
+                <tbody>${this.renderScannerRows(this.getSortedRows())}</tbody>
+            </table>
+        </div>`;
+    },
+
+    // Extracted row renderer — called by both renderScanner() and refreshScanner()
+    renderScannerRows(rows) {
         const scoreBar = s => {
             if (s == null) return '—';
             const color = s >= 70 ? 'var(--green)' : s >= 50 ? 'var(--yellow)' : 'var(--red)';
@@ -131,50 +246,35 @@ const ModelView = {
             return `<span style="color:${color};font-weight:700">${'⚡'.repeat(Math.min(v,4))} ${v}</span>`;
         };
 
-        const stockMetaMap = Object.fromEntries(
-            (typeof state !== 'undefined' ? state.stocks : []).map(s => [s.symbol, s])
-        );
+        const metaMap = this.getMetaMap();
 
-        return `
-        <div class="scanner-wrap">
-            <table class="scanner-table">
-                <thead><tr>
-                    <th>Symbol</th><th>Score</th><th>Conf.</th>
-                    <th>RSI</th><th>MACD</th><th>Volume</th><th>Peer Rank</th>
-                    <th>OBV(4w)</th><th>vs 200w</th><th>Price</th><th>Est. 1Y Target</th>
-                </tr></thead>
-                <tbody>
-                ${rows.map(r => {
-                    const meta = stockMetaMap[r.symbol];
-                    const eg   = meta?.estYearGrowth;
-                    const targetPrice = r.close != null && eg != null ? r.close * (1 + eg / 100) : null;
-                    const fmtTarget = targetPrice != null
-                        ? `<span class="${eg >= 0 ? 'positive' : 'negative'}">$${targetPrice.toFixed(2)}</span>
-                           <small class="text3"> ${eg >= 0 ? '+' : ''}${eg}%</small>`
-                        : '—';
-                    const isEtf = meta?.isEtf;
-                    const symLabel = isEtf
-                        ? `<span class="scan-sym" style="color:${COLORS[r.symbol]||'#FFDD57'}">${r.symbol}</span>
-                           <span class="badge badge-etf" style="font-size:9px;padding:1px 5px;margin-left:4px">ETF</span>`
-                        : `<span class="scan-sym" style="color:${COLORS[r.symbol]||'#58A6FF'}">${r.symbol}</span>`;
-                    return `
-                <tr class="scanner-row ${r.symbol===this.activeSymbol?'active':''}" data-sym="${r.symbol}">
-                    <td>${symLabel}</td>
-                    <td>${scoreBar(r.score)}</td>
-                    <td>${fmtConf(r.confluence)}</td>
-                    <td>${fmtRSI(r.rsi)}</td>
-                    <td>${fmtMACD(r.macd_hist)}</td>
-                    <td>${fmtVol(r.vol_ratio)}</td>
-                    <td>${fmtRank(r.peer_rank)}</td>
-                    <td>${fmtOBV(r.obv_roc4)}</td>
-                    <td>${fmtMA(r.dist_200w)}</td>
-                    <td>$${r.close?.toFixed(2)??'—'}</td>
-                    <td>${fmtTarget}</td>
-                </tr>`;
-                }).join('')}
-                </tbody>
-            </table>
-        </div>`;
+        return rows.map(r => {
+            const meta = metaMap.get(r.symbol);
+            const eg   = meta?.estYearGrowth;
+            const targetPrice = r.close != null && eg != null ? r.close * (1 + eg / 100) : null;
+            const fmtTarget = targetPrice != null
+                ? `<span class="${eg >= 0 ? 'positive' : 'negative'}">$${targetPrice.toFixed(2)}</span>
+                   <small class="text3"> ${eg >= 0 ? '+' : ''}${eg}%</small>`
+                : '—';
+            const symLabel = meta?.isEtf
+                ? `<span class="scan-sym" style="color:${getGrowthColor(eg)}">${r.symbol}</span>
+                   <span class="badge badge-etf" style="font-size:9px;padding:1px 5px;margin-left:4px">ETF</span>`
+                : `<span class="scan-sym" style="color:${getGrowthColor(eg)}">${r.symbol}</span>`;
+            return `
+            <tr class="scanner-row ${r.symbol===this.activeSymbol?'active':''}" data-sym="${r.symbol}">
+                <td>${symLabel}</td>
+                <td>${scoreBar(r.score)}</td>
+                <td>${fmtConf(r.confluence)}</td>
+                <td>${fmtRSI(r.rsi)}</td>
+                <td>${fmtMACD(r.macd_hist)}</td>
+                <td>${fmtVol(r.vol_ratio)}</td>
+                <td>${fmtRank(r.peer_rank)}</td>
+                <td>${fmtOBV(r.obv_roc4)}</td>
+                <td>${fmtMA(r.dist_200w)}</td>
+                <td>$${r.close?.toFixed(2)??'—'}</td>
+                <td>${fmtTarget}</td>
+            </tr>`;
+        }).join('');
     },
 
     // ── Per-stock detail ──────────────────────────────────────────────
@@ -206,7 +306,9 @@ const ModelView = {
         const { indicators, signals } = this.detail;
         if (!indicators?.length) return `<div class="model-loading">No indicator data for ${symbol}</div>`;
 
-        const color  = COLORS[symbol] || '#58A6FF';
+        const allStocksD = typeof state !== 'undefined' ? [...state.stocks, ...Object.values(state.panels).flat()] : [];
+        const stockD     = allStocksD.find(s => s.symbol === symbol);
+        const color  = getGrowthColor(stockD?.estYearGrowth);
         const sigs   = (signals || []).slice().sort((a, b) => b.date.localeCompare(a.date));
         const latest = indicators[indicators.length - 1] || {};
         const gc     = latest.golden_cross === 1;
@@ -229,7 +331,7 @@ const ModelView = {
                 <div class="detail-chart-row main-row">
                     <div class="chart-label">Price · 52W High · SMA 200w</div>
                     <div class="detail-canvas-wrap" style="height:200px"><canvas id="dc-price-${symbol}"></canvas></div>
-                    <div class="chart-label" style="margin-top:8px">Breakout Score (green line = 70 threshold)</div>
+                    <div class="chart-label threshold-label" style="margin-top:8px">Breakout Score  (threshold: ${(typeof settings !== 'undefined' ? settings.breakoutThreshold : 70)})</div>
                     <div class="detail-canvas-wrap" style="height:72px"><canvas id="dc-score-${symbol}"></canvas></div>
                 </div>
                 <div class="detail-chart-row sub-row">
@@ -246,7 +348,7 @@ const ModelView = {
                 </div>
             </div>
 
-            ${this.buildTranscriptSection(symbol)}
+            ${(typeof settings === 'undefined' || settings.showTranscripts) ? this.buildTranscriptSection(symbol) : ''}
 
             <div class="signal-section">
                 <div class="signal-title">Signal History — ${symbol} &nbsp;(${sigs.length} total)</div>
@@ -290,7 +392,9 @@ const ModelView = {
         const rows = indicators.filter(r => r.date >= cutStr);
         if (!rows.length) return;
 
-        const color    = COLORS[symbol] || '#58A6FF';
+        const allStocksR = typeof state !== 'undefined' ? [...state.stocks, ...Object.values(state.panels).flat()] : [];
+        const stockR     = allStocksR.find(s => s.symbol === symbol);
+        const color    = getGrowthColor(stockR?.estYearGrowth);
         const labels   = rows.map(r => new Date(r.date));
         const sigDates = new Set((signals || []).map(s => s.date));
 
@@ -325,10 +429,11 @@ const ModelView = {
         ]}, options:base() }));
 
         // Breakout score
+        const _thresh = (typeof settings !== 'undefined') ? settings.breakoutThreshold : 70;
         const sc = document.getElementById(`dc-score-${symbol}`);
         if (sc) push(new Chart(sc, { type:'line', data:{ labels, datasets:[
             { data:rows.map(r=>r.score), borderColor:'#D29922', backgroundColor:rgba('#D29922',0.15), borderWidth:1.5, pointRadius:0, fill:true },
-            { data:rows.map(()=>70), borderColor:'#3FB950', borderDash:[3,3], borderWidth:1, pointRadius:0, fill:false },
+            { data:rows.map(()=>_thresh), borderColor:'#3FB950', borderDash:[3,3], borderWidth:1, pointRadius:0, fill:false },
         ]}, options:{...base(0,100), scales:{...base(0,100).scales, y:{...base(0,100).scales.y, ticks:{color:'#6E7681',callback:v=>v.toFixed(0)}}}} }));
 
         // RSI
@@ -633,6 +738,7 @@ const ModelView = {
 
     // ── Data gap inventory ─────────────────────────────────────────────
     renderDataGaps() {
+        if (typeof settings !== 'undefined' && !settings.showDataGaps) return '';
         return `
         <div class="model-data-gaps">
             <div class="data-gaps-title">Additional data that would improve the model</div>
@@ -667,11 +773,32 @@ const ModelView = {
 
     async triggerEarnings() {
         showStatus('Fetching EPS then recomputing (~4 min)…', 'info', true);
-        await fetch('/api/fetch-earnings', { method:'POST' });
-        setTimeout(async () => { await this.load(); await this.loadRegime(); this.render(); hideStatus(); }, 250000);
+        const startRunAt = this.data?.modelRunAt ?? null;
+        await fetch('/api/fetch-earnings', { method: 'POST' });
+
+        const poll = setInterval(async () => {
+            try {
+                const res = await fetch('/api/models').then(r => r.json());
+                if (res.modelRunAt && res.modelRunAt !== startRunAt) {
+                    clearInterval(poll);
+                    this.data = res;
+                    await this.loadRegime();
+                    this.render();
+                    showStatus('EPS loaded and models recomputed!', 'success');
+                    setTimeout(hideStatus, 3000);
+                }
+            } catch { /* keep polling */ }
+        }, 8000);
+        setTimeout(() => clearInterval(poll), 600000); // 10 min max
     },
 
     async triggerTranscripts(symbol) {
+        // Cancel any previous poll before starting a new one
+        if (this.transcriptPoll !== null) {
+            clearInterval(this.transcriptPoll);
+            this.transcriptPoll = null;
+        }
+
         const msg = symbol
             ? `Fetching ${symbol} transcripts from SEC EDGAR…`
             : 'Fetching all transcripts from SEC EDGAR (~3 min per stock)…';
@@ -683,10 +810,11 @@ const ModelView = {
         });
         // Poll until the transcript count for this symbol increases
         const startCount = symbol ? (this.transcriptSignals[symbol] || []).length : 0;
-        const poll = setInterval(async () => {
+        this.transcriptPoll = setInterval(async () => {
             const res = await fetch(`/api/transcript-signals/${symbol || 'NVDA'}`).then(r => r.json());
             if ((res.signals || []).length > startCount) {
-                clearInterval(poll);
+                clearInterval(this.transcriptPoll);
+                this.transcriptPoll = null;
                 if (symbol) {
                     this.transcriptSignals[symbol] = res.signals;
                     await this.loadDetail(symbol);
@@ -698,7 +826,12 @@ const ModelView = {
                 setTimeout(hideStatus, 3000);
             }
         }, 5000);
-        setTimeout(() => clearInterval(poll), 600000); // 10 min max
+        setTimeout(() => {
+            if (this.transcriptPoll !== null) {
+                clearInterval(this.transcriptPoll);
+                this.transcriptPoll = null;
+            }
+        }, 600000); // 10 min max
     },
 };
 
@@ -710,7 +843,3 @@ function fwdFmt(v)  { return v==null?'—':(v>=0?'+':'')+v.toFixed(1)+'%'; }
 function fmtAvg(v)  { return v==null?'—':(parseFloat(v)>=0?'+':'')+v+'%'; }
 function fwdClass(v){ return v==null?'':v>0?'positive':v<0?'negative':''; }
 function pctClass(v){ return v==null?'':parseFloat(v)>=60?'positive':parseFloat(v)<50?'negative':''; }
-function rgba(hex,a){
-    const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
-    return `rgba(${r},${g},${b},${a})`;
-}

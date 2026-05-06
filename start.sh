@@ -11,4 +11,10 @@ if lsof -ti tcp:$PORT &>/dev/null; then
 fi
 
 echo "Starting TenX Stock Analyzer on http://localhost:$PORT"
+node scheduler.js &
+SCHEDULER_PID=$!
+echo "Scheduler started (PID $SCHEDULER_PID)"
+
 node server.js
+
+kill $SCHEDULER_PID 2>/dev/null

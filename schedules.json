@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "timezone": "America/New_York",
+  "jobs": [
+    {
+      "id": "market-open-bell",
+      "name": "NYSE Market Open Bell",
+      "description": "Fetch prices and recompute models 1 minute after NYSE opens",
+      "cron": "31 9 * * 1-5",
+      "tradingDaysOnly": true,
+      "action": {
+        "type": "http",
+        "method": "POST",
+        "url": "http://localhost:9004/api/bell"
+      },
+      "enabled": true
+    }
+  ]
+}

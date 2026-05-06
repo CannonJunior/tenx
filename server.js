@@ -4,7 +4,6 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const url = require('url');
 require('dotenv').config();
 
 const db = require('./database');
@@ -14,22 +13,173 @@ const { fetchAllTranscripts } = require('./fetch-transcripts');
 const { backtestStats } = require('./models');
 const PORT = process.env.PORT || 9004;
 
+// ── Claude CLI streaming helper ───────────────────────────────────────
+// Uses the installed `claude` CLI (Claude Code) with the existing OAuth
+// session — no separate ANTHROPIC_API_KEY needed.
+const { spawn } = require('child_process');
+
+function streamClaude(systemPrompt, userPrompt, serverRes) {
+    return new Promise(resolve => {
+        const claudePath = process.env.CLAUDE_PATH || 'claude';
+
+        const proc = spawn(claudePath, [
+            '-p', userPrompt,
+            '--system-prompt', systemPrompt,
+            '--output-format', 'stream-json',
+            '--include-partial-messages',
+            '--verbose',
+            '--model', 'claude-sonnet-4-6',
+        ], { env: process.env });
+
+        let buf = '';
+
+        proc.stdout.on('data', chunk => {
+            buf += chunk.toString();
+            const lines = buf.split('\n');
+            buf = lines.pop();           // keep incomplete trailing line
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const evt = JSON.parse(line);
+                    // Incremental text deltas arrive as stream_event → content_block_delta
+                    if (evt.type === 'stream_event' &&
+                        evt.event?.type === 'content_block_delta' &&
+                        evt.event?.delta?.type === 'text_delta') {
+                        serverRes.write(`data: ${JSON.stringify({ text: evt.event.delta.text })}\n\n`);
+                    }
+                } catch { /* skip non-JSON or unknown event types */ }
+            }
+        });
+
+        proc.stderr.on('data', chunk => {
+            console.error('[inference]', chunk.toString().trim());
+        });
+
+        proc.on('close', code => {
+            if (code !== 0 && code !== null) {
+                serverRes.write(`data: ${JSON.stringify({ text: `\n\n*Claude process exited with code ${code}.*` })}\n\n`);
+            }
+            serverRes.write('data: [DONE]\n\n');
+            resolve();
+        });
+
+        proc.on('error', err => {
+            serverRes.write(`data: ${JSON.stringify({ text: `\n\n**Error spawning claude CLI:** ${err.message}` })}\n\n`);
+            serverRes.write('data: [DONE]\n\n');
+            resolve();
+        });
+    });
+}
+
+// ── Alpha Vantage news/sentiment fetch ────────────────────────────────
+function fetchMediaFromAlphaVantage(symbol, fromDate) {
+    const key  = process.env.ALPHA_VANTAGE_API_KEY;
+    const from = fromDate ? fromDate.replace(/-/g,'').slice(0,8) + 'T0000' : '';
+    const endpoint = `https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=${symbol}&limit=50${from ? '&time_from='+from : ''}&apikey=${key}`;
+    return new Promise((resolve, reject) => {
+        https.get(endpoint, res => {
+            let raw = '';
+            res.on('data', c => { raw += c; });
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(raw);
+                    if (json['Error Message']) return reject(new Error(json['Error Message']));
+                    if (json['Note'])          return reject(new Error('Rate limit: ' + json['Note']));
+                    if (json['Information'])   return reject(new Error('API limit: ' + json['Information']));
+                    const feed = json.feed || [];
+                    const articles = feed.map(a => {
+                        const ts = a.ticker_sentiment?.find(t => t.ticker === symbol);
+                        return {
+                            published_at:    a.time_published?.replace(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/, '$1-$2-$3T$4:$5:$6'),
+                            title:           a.title,
+                            url:             a.url,
+                            source:          a.source,
+                            summary:         (a.summary || '').slice(0, 500),
+                            sentiment_score: parseFloat(a.overall_sentiment_score) || null,
+                            relevance_score: ts ? parseFloat(ts.relevance_score) : null,
+                        };
+                    });
+                    resolve(articles);
+                } catch(e) { reject(e); }
+            });
+        }).on('error', reject);
+    });
+}
+
+// ── Build inference prompt from all available stock data ────────────��
+function buildInferencePrompt(symbol) {
+    const prices    = db.getPrices(symbol, 24);
+    const inds      = db.getIndicators(symbol);
+    const signals   = db.getAllSignals ? db.getAllSignals() : [];
+    const sigs      = signals.filter(s => s.symbol === symbol).slice(-8);
+    const transcSig = db.getTranscriptSignals(symbol);
+    const media     = db.getMedia(symbol, 15);
+    const allStocks = [...STOCKS];
+
+    const latest    = inds[inds.length - 1] || {};
+    const first     = prices[0], last = prices[prices.length - 1];
+    const ret24m    = first && last ? (((last.close - first.close) / first.close) * 100).toFixed(1) : '?';
+    const latestTS  = transcSig[transcSig.length - 1];
+
+    const signalSummary = sigs.slice(-5).map(s =>
+        `  • ${s.date} — ${s.type} (score ${s.score?.toFixed(0)})`).join('\n') || '  (none)';
+
+    const mediaSummary = media.slice(0, 8).map(a =>
+        `  • [${a.published_at?.slice(0,10)}] ${a.title} (sentiment: ${a.sentiment_score?.toFixed(2) ?? '?'})`
+    ).join('\n') || '  (no media loaded)';
+
+    const edgarSummary = latestTS
+        ? `Latest quarter NLP: sentiment ${latestTS.sentiment_score?.toFixed(3)}, ` +
+          `AI/DC mentions ${latestTS.ai_dc_mentions}, demand+ ${latestTS.demand_pos}, ` +
+          `demand- ${latestTS.demand_neg}, guidance↑ ${latestTS.guidance_up}, guidance↓ ${latestTS.guidance_down}`
+        : '  (no EDGAR data loaded)';
+
+    const userPrompt = `Stock under analysis: **${symbol}**
+Current price: $${last?.close?.toFixed(2) ?? '?'}  |  24M return: ${ret24m}%
+Breakout score: ${latest.score?.toFixed(0) ?? '?'}/100  |  RSI: ${latest.rsi?.toFixed(1) ?? '?'}  |  Peer rank: ${latest.peer_rank != null ? '#'+(10-Math.round(latest.peer_rank*9)) : '?'}
+
+Recent model signals:
+${signalSummary}
+
+EDGAR / MD&A NLP signals (${transcSig.length} quarters loaded):
+${edgarSummary}
+
+Recent media headlines:
+${mediaSummary}
+
+---
+Based on the data above, please:
+1. Identify the 2-3 most significant business trends or strategic shifts visible in ${symbol}'s price action, signals, management language, and media coverage.
+2. For each trend, identify specific publicly-traded companies (whether listed in this app or not) that could be materially impacted — positively or negatively.
+3. For each implied relationship, explain the mechanism (supply chain, licensing, competitive displacement, co-investment, etc.) and estimate the directional impact on those companies' stock prices.
+4. Flag any second/third-order effects that are non-obvious but potentially significant.
+
+Be specific about company names, ticker symbols where known, and quantitative estimates where possible. Format your response with clear headers.`;
+
+    const systemPrompt = `You are a senior technology equity analyst and supply chain strategist. You specialize in identifying cross-stock implications — how trends at one company ripple through its ecosystem partners, competitors, and adjacent industries. You think in second and third-order effects. Be direct, specific, and actionable.`;
+
+    return { userPrompt, systemPrompt };
+}
+
 // Top 10 S&P 500 semiconductor stocks ranked by estimated 1-year growth (Apr 2025–Apr 2026)
 const STOCKS = [
-    { symbol: 'MU',   name: 'Micron Technology',         subIndustry: 'Semiconductors',                       estYearGrowth: 168 },
-    { symbol: 'KLAC', name: 'KLA Corporation',            subIndustry: 'Semiconductor Materials & Equipment',  estYearGrowth: 112 },
-    { symbol: 'AMD',  name: 'Advanced Micro Devices',     subIndustry: 'Semiconductors',                       estYearGrowth: 64  },
-    { symbol: 'AVGO', name: 'Broadcom',                   subIndustry: 'Semiconductors',                       estYearGrowth: 41  },
-    { symbol: 'NVDA', name: 'Nvidia',                     subIndustry: 'Semiconductors',                       estYearGrowth: 27  },
-    { symbol: 'LRCX', name: 'Lam Research',               subIndustry: 'Semiconductor Materials & Equipment',  estYearGrowth: 25  },
-    { symbol: 'AMAT', name: 'Applied Materials',          subIndustry: 'Semiconductor Materials & Equipment',  estYearGrowth: 22  },
-    { symbol: 'MPWR', name: 'Monolithic Power Systems',   subIndustry: 'Semiconductors',                       estYearGrowth: 20  },
-    { symbol: 'ADI',  name: 'Analog Devices',             subIndustry: 'Semiconductors',                       estYearGrowth: 15  },
-    { symbol: 'QCOM', name: 'Qualcomm',                   subIndustry: 'Semiconductors',                       estYearGrowth: 10  },
-    { symbol: 'SNDK', name: 'Sandisk',                    subIndustry: 'Data Storage',                         estYearGrowth: -11 },
-    { symbol: 'WDC',  name: 'Western Digital',            subIndustry: 'Data Storage',                         estYearGrowth: -25 },
-    { symbol: 'STX',  name: 'Seagate Technology',         subIndustry: 'Data Storage',                         estYearGrowth: -23 },
-    { symbol: 'SMH',  name: 'VanEck Semiconductor ETF',   subIndustry: 'ETF',                                  estYearGrowth: 25,  isEtf: true },
+    { symbol: 'MU',    name: 'Micron Technology',         subIndustry: 'Semiconductors',                       estYearGrowth: 168 },
+    { symbol: 'KLAC',  name: 'KLA Corporation',            subIndustry: 'Semiconductor Materials & Equipment',  estYearGrowth: 112 },
+    { symbol: 'HXSCL', name: 'SK Hynix',                   subIndustry: 'Semiconductors',                       estYearGrowth: 80  },
+    { symbol: 'AMD',   name: 'Advanced Micro Devices',     subIndustry: 'Semiconductors',                       estYearGrowth: 64  },
+    { symbol: 'AVGO',  name: 'Broadcom',                   subIndustry: 'Semiconductors',                       estYearGrowth: 41  },
+    { symbol: 'TSM',   name: 'Taiwan Semiconductor',       subIndustry: 'Semiconductors',                       estYearGrowth: 32  },
+    { symbol: 'NVDA',  name: 'Nvidia',                     subIndustry: 'Semiconductors',                       estYearGrowth: 27  },
+    { symbol: 'LRCX',  name: 'Lam Research',               subIndustry: 'Semiconductor Materials & Equipment',  estYearGrowth: 25  },
+    { symbol: 'VRT',   name: 'Vertiv Holdings',            subIndustry: 'Data Center Infra',                    estYearGrowth: 24  },
+    { symbol: 'AMAT',  name: 'Applied Materials',          subIndustry: 'Semiconductor Materials & Equipment',  estYearGrowth: 22  },
+    { symbol: 'MPWR',  name: 'Monolithic Power Systems',   subIndustry: 'Semiconductors',                       estYearGrowth: 20  },
+    { symbol: 'ADI',   name: 'Analog Devices',             subIndustry: 'Semiconductors',                       estYearGrowth: 15  },
+    { symbol: 'QCOM',  name: 'Qualcomm',                   subIndustry: 'Semiconductors',                       estYearGrowth: 10  },
+    { symbol: 'SNDK',  name: 'Sandisk',                    subIndustry: 'Data Storage',                         estYearGrowth: -11 },
+    { symbol: 'WDC',   name: 'Western Digital',            subIndustry: 'Data Storage',                         estYearGrowth: -25 },
+    { symbol: 'STX',   name: 'Seagate Technology',         subIndustry: 'Data Storage',                         estYearGrowth: -23 },
+    { symbol: 'SMH',   name: 'VanEck Semiconductor ETF',   subIndustry: 'ETF',                                  estYearGrowth: 25,  isEtf: true },
 ];
 
 // S&P 500 stocks with highest short interest % of float (May 2026), ranked descending
@@ -97,6 +247,19 @@ const MIME = {
     '.svg':  'image/svg+xml',
     '.ico':  'image/x-icon',
 };
+
+const CACHE_CONTROL = {
+    'text/html':        'no-cache',
+    'text/javascript':  'max-age=3600',
+    'text/css':         'max-age=3600',
+    'image/svg+xml':    'max-age=3600',
+    'image/x-icon':     'max-age=86400',
+    'application/json': 'no-store',
+};
+
+// Per-symbol cooldown for inference (60 s) — prevents concurrent Claude spawns
+const _inferCooldown = new Map();
+let _bellRunning = false;
 
 // Rate-limited fetch queue: Alpha Vantage free tier = 5 req/min, 25 req/day
 const fetchQueue = [];
@@ -176,14 +339,18 @@ function json(res, data, status = 200) {
 function readBody(req) {
     return new Promise((resolve) => {
         let buf = '';
-        req.on('data', c => { buf += c; });
+        req.on('data', c => {
+            buf += c;
+            if (buf.length > 65536) { req.destroy(); resolve({}); }
+        });
         req.on('end', () => { try { resolve(JSON.parse(buf)); } catch { resolve({}); } });
     });
 }
 
 const server = http.createServer(async (req, res) => {
-    const parsed = url.parse(req.url, true);
-    const { pathname, query } = parsed;
+    const parsed   = new URL(req.url, 'http://localhost');
+    const pathname = parsed.pathname;
+    const query    = Object.fromEntries(parsed.searchParams);
 
     if (req.method === 'OPTIONS') {
         res.writeHead(200, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST' });
@@ -198,47 +365,145 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    if (pathname === '/api/edgar-summary') {
+        json(res, db.getEdgarSummary());
+        return;
+    }
+
+    // ── Advanced analysis API routes ─────────────────────────────────
+
+    // GET /api/advanced-status/:symbol — button states (has data?)
+    if (pathname.startsWith('/api/advanced-status/')) {
+        const symbol = pathname.split('/')[3]?.toUpperCase();
+        if (!symbol) return json(res, { error: 'symbol required' }, 400);
+        json(res, db.getAdvancedStatus(symbol));
+        return;
+    }
+
+    // GET /api/media/:symbol — recent articles
+    if (pathname.startsWith('/api/media/') && !pathname.startsWith('/api/media/fetch')) {
+        const symbol = pathname.split('/')[3]?.toUpperCase();
+        if (!symbol) return json(res, { error: 'symbol required' }, 400);
+        json(res, { symbol, articles: db.getMedia(symbol), fetchLog: db.getMediaFetchLog(symbol) });
+        return;
+    }
+
+    // POST /api/media/fetch — fetch news from Alpha Vantage NEWS_SENTIMENT
+    if (pathname === '/api/media/fetch' && req.method === 'POST') {
+        const body    = await readBody(req);
+        const symbol  = (body.symbol || '').toUpperCase();
+        const fromDate = body.fromDate || null;
+        if (!symbol) return json(res, { error: 'symbol required' }, 400);
+        try {
+            const articles = await fetchMediaFromAlphaVantage(symbol, fromDate);
+            db.saveMedia(symbol, articles);
+            json(res, { symbol, count: articles.length, saved: articles.length });
+        } catch(err) {
+            json(res, { error: err.message }, 500);
+        }
+        return;
+    }
+
+    // GET /api/inference/:symbol — retrieve cached inference result
+    if (pathname.startsWith('/api/inference/') && req.method === 'GET') {
+        const symbol = pathname.split('/')[3]?.toUpperCase();
+        if (!symbol) return json(res, { error: 'symbol required' }, 400);
+        json(res, db.getInferenceResult(symbol) || {});
+        return;
+    }
+
+    // POST /api/infer/:symbol — stream Claude inference via SSE, save result when complete
+    if (pathname.startsWith('/api/infer/') && req.method === 'POST') {
+        const symbol = pathname.split('/')[3]?.toUpperCase();
+        if (!symbol) return json(res, { error: 'symbol required' }, 400);
+        const lastRun = _inferCooldown.get(symbol) ?? 0;
+        if (Date.now() - lastRun < 60000)
+            return json(res, { error: 'cooldown: inference for this symbol was triggered recently' }, 429);
+        _inferCooldown.set(symbol, Date.now());
+        res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection':    'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+        });
+
+        // Intercept writes to accumulate full text while still streaming to client
+        let fullResult = '';
+        const intercepted = {
+            write(chunk) {
+                res.write(chunk);
+                if (typeof chunk === 'string') {
+                    for (const line of chunk.split('\n')) {
+                        if (!line.startsWith('data: ') || line.slice(6) === '[DONE]') continue;
+                        try { const e = JSON.parse(line.slice(6)); if (e.text) fullResult += e.text; }
+                        catch { /* ignore */ }
+                    }
+                }
+            }
+        };
+
+        const { userPrompt, systemPrompt } = buildInferencePrompt(symbol);
+        await streamClaude(systemPrompt, userPrompt, intercepted);
+
+        if (fullResult.trim()) db.saveInferenceResult(symbol, fullResult);
+
+        res.end();
+        return;
+    }
+
     if (pathname === '/api/stocks') {
+        const symbols     = STOCKS.map(s => s.symbol);
+        const priceStatus = db.getPriceStatus(symbols);
+        const fetchLogs   = db.getFetchLogs(symbols);
         json(res, {
             sector: 'Information Technology',
             subSector: 'Semiconductors',
             stocks: STOCKS.map(s => ({
                 ...s,
-                hasData: db.hasPrices(s.symbol),
-                fetchLog: db.getFetchLog(s.symbol),
+                hasData:  priceStatus[s.symbol],
+                fetchLog: fetchLogs[s.symbol],
             })),
         });
         return;
     }
 
     if (pathname === '/api/watchlist') {
+        const symbols     = WATCHLIST.map(s => s.symbol);
+        const priceStatus = db.getPriceStatus(symbols);
+        const fetchLogs   = db.getFetchLogs(symbols);
         json(res, {
             watchlist: WATCHLIST.map(s => ({
                 ...s,
-                hasData: db.hasPrices(s.symbol),
-                fetchLog: db.getFetchLog(s.symbol),
+                hasData:  priceStatus[s.symbol],
+                fetchLog: fetchLogs[s.symbol],
             })),
         });
         return;
     }
 
     if (pathname === '/api/shortlist') {
+        const symbols     = SHORTLIST.map(s => s.symbol);
+        const priceStatus = db.getPriceStatus(symbols);
+        const fetchLogs   = db.getFetchLogs(symbols);
         json(res, {
             shortlist: SHORTLIST.map(s => ({
                 ...s,
-                hasData: db.hasPrices(s.symbol),
-                fetchLog: db.getFetchLog(s.symbol),
+                hasData:  priceStatus[s.symbol],
+                fetchLog: fetchLogs[s.symbol],
             })),
         });
         return;
     }
 
     if (pathname === '/api/marketcap') {
+        const symbols     = MARKETCAP.map(s => s.symbol);
+        const priceStatus = db.getPriceStatus(symbols);
+        const fetchLogs   = db.getFetchLogs(symbols);
         json(res, {
             marketcap: MARKETCAP.map(s => ({
                 ...s,
-                hasData: db.hasPrices(s.symbol),
-                fetchLog: db.getFetchLog(s.symbol),
+                hasData:  priceStatus[s.symbol],
+                fetchLog: fetchLogs[s.symbol],
             })),
         });
         return;
@@ -375,16 +640,73 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    // POST /api/bell — market-open sequence: fetch all prices then recompute models
+    if (pathname === '/api/bell' && req.method === 'POST') {
+        if (_bellRunning) {
+            json(res, { skipped: true, reason: 'Bell sequence already in progress' });
+            return;
+        }
+        _bellRunning = true;
+        json(res, { triggered: true, startedAt: new Date().toISOString() });
+        console.log('[bell] Market-open sequence started');
+        const fetches = STOCKS.map(s =>
+            enqueue(s.symbol).catch(err => console.error(`[bell] fetch error for ${s.symbol}:`, err.message))
+        );
+        Promise.all(fetches)
+            .then(() => {
+                console.log('[bell] Fetches complete — running compute-models');
+                return computeAndStore();
+            })
+            .then(() => {
+                console.log('[bell] Bell sequence complete');
+                db.setMeta('bell_last_success', new Date().toISOString());
+            })
+            .catch(err => console.error('[bell] Error:', err.message))
+            .finally(() => { _bellRunning = false; });
+        return;
+    }
+
+    // GET /api/schedules — job config with last-run status
+    if (pathname === '/api/schedules') {
+        try {
+            const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'schedules.json'), 'utf8'));
+            json(res, {
+                timezone: config.timezone,
+                jobs: config.jobs.map(job => ({
+                    ...job,
+                    lastRun:     db.getLastSchedulerRun(job.id),
+                    lastSuccess: job.id === 'market-open-bell' ? db.getMeta('bell_last_success') : null,
+                    running:     job.id === 'market-open-bell' ? _bellRunning : false,
+                })),
+            });
+        } catch (err) {
+            json(res, { error: err.message }, 500);
+        }
+        return;
+    }
+
     // --- Static files ---
-    const filePath = path.join(__dirname, 'public', pathname === '/' ? 'index.html' : pathname);
+    const publicDir = path.join(__dirname, 'public');
+    const filePath  = path.join(publicDir, pathname === '/' ? 'index.html' : pathname);
+
+    if (!filePath.startsWith(publicDir + path.sep)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Forbidden');
+        return;
+    }
+
     fs.readFile(filePath, (err, data) => {
         if (err) {
             res.writeHead(404, { 'Content-Type': 'text/plain' });
             res.end('Not found');
             return;
         }
-        const ext = path.extname(filePath).toLowerCase();
-        res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+        const ext         = path.extname(filePath).toLowerCase();
+        const contentType = MIME[ext] || 'application/octet-stream';
+        res.writeHead(200, {
+            'Content-Type':  contentType,
+            'Cache-Control': CACHE_CONTROL[contentType] || 'max-age=3600',
+        });
         res.end(data);
     });
 });
