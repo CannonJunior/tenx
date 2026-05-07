@@ -14,6 +14,19 @@
         "url": "http://localhost:9004/api/bell"
       },
       "enabled": true
+    },
+    {
+      "id": "market-close",
+      "name": "NYSE Market Close",
+      "description": "Volume analysis, trending stories, and smart money summary at NYSE close",
+      "cron": "0 16 * * 1-5",
+      "tradingDaysOnly": true,
+      "action": {
+        "type": "http",
+        "method": "POST",
+        "url": "http://localhost:9004/api/close"
+      },
+      "enabled": true
     }
   ]
 }

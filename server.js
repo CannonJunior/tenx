@@ -260,6 +260,7 @@ const CACHE_CONTROL = {
 // Per-symbol cooldown for inference (60 s) — prevents concurrent Claude spawns
 const _inferCooldown = new Map();
 let _bellRunning = false;
+let _closeRunning = false;
 
 // Rate-limited fetch queue: Alpha Vantage free tier = 5 req/min, 25 req/day
 const fetchQueue = [];
@@ -296,6 +297,129 @@ function enqueue(symbol) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function notifyGreen(text) {
+    const url   = process.env.GREEN_PUSH_URL   || 'http://localhost:9003/api/notify';
+    const token = process.env.GREEN_PUSH_TOKEN || '';
+    if (!token) return Promise.resolve();
+    const body = JSON.stringify({ text });
+    return new Promise(resolve => {
+        const u = new URL(url);
+        const req = http.request({
+            hostname: u.hostname,
+            port:     parseInt(u.port) || 80,
+            path:     u.pathname,
+            method:   'POST',
+            headers: {
+                'Content-Type':   'application/json',
+                'Content-Length': Buffer.byteLength(body),
+                'Authorization':  `Bearer ${token}`,
+            },
+        }, res => { res.resume(); res.on('end', resolve); });
+        req.on('error', err => { console.error('[bell] Green notify error:', err.message); resolve(); });
+        req.end(body);
+    });
+}
+
+function buildBellSummary() {
+    const dateStr = new Date().toLocaleDateString('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric',
+    });
+    const indicators   = db.getLatestIndicators();
+    const sectorHealth = db.getMeta('sector_health_latest');
+    const stockSymbols = new Set(STOCKS.map(s => s.symbol));
+    const scored = indicators
+        .filter(r => stockSymbols.has(r.symbol) && r.score != null)
+        .sort((a, b) => b.score - a.score);
+    const high = scored.filter(r => r.score >= 65);
+    const low  = scored.filter(r => r.score < 35);
+    const lines = [`NYSE open — ${dateStr}`];
+    if (sectorHealth != null)
+        lines.push(`Sector health: ${parseFloat(sectorHealth).toFixed(2)}`);
+    if (high.length > 0) {
+        lines.push('');
+        lines.push('High breakout: ' + high.map(r => `${r.symbol} ${Math.round(r.score)}`).join('  '));
+    }
+    if (low.length > 0)
+        lines.push('Low: ' + low.map(r => `${r.symbol} ${Math.round(r.score)}`).join('  '));
+    if (high.length === 0 && low.length === 0)
+        lines.push('No strong signals today.');
+    return lines.join('\n');
+}
+
+function fetchCombinedMedia(symbols) {
+    const key      = process.env.ALPHA_VANTAGE_API_KEY;
+    const tickers  = symbols.filter(s => s !== 'HXSCL').join(',');
+    const endpoint = `https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=${tickers}&limit=50&apikey=${key}`;
+    return new Promise((resolve, reject) => {
+        https.get(endpoint, res => {
+            let raw = '';
+            res.on('data', c => { raw += c; });
+            res.on('end', () => {
+                try {
+                    const data = JSON.parse(raw);
+                    if (data['Error Message']) return reject(new Error(data['Error Message']));
+                    if (data['Note'])          return reject(new Error('Rate limit: ' + data['Note']));
+                    if (data['Information'])   return reject(new Error('API limit: ' + data['Information']));
+                    resolve((data.feed || []).map(a => ({
+                        published_at:    (a.time_published || '').replace(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/, '$1-$2-$3T$4:$5:$6'),
+                        title:           a.title           || '',
+                        source:          a.source          || '',
+                        summary:         (a.summary        || '').slice(0, 300),
+                        sentiment_score: parseFloat(a.overall_sentiment_score) || null,
+                        tickers:         (a.ticker_sentiment || []).map(t => t.ticker).join(', '),
+                    })));
+                } catch (e) { reject(e); }
+            });
+        }).on('error', reject);
+    });
+}
+
+function buildClosePrompt(indicators, articles) {
+    const dateStr = new Date().toLocaleDateString('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric',
+    });
+    const stockSymbols = new Set(STOCKS.map(s => s.symbol));
+    const scored = indicators
+        .filter(r => stockSymbols.has(r.symbol) && r.score != null)
+        .sort((a, b) => b.score - a.score);
+
+    const stockTable = scored.map(r => {
+        const roc = r.roc_4w != null ? `${r.roc_4w >= 0 ? '+' : ''}${(r.roc_4w * 100).toFixed(1)}%` : '?';
+        const vol = r.vol_ratio != null ? `${r.vol_ratio.toFixed(2)}x` : '?';
+        return `  ${r.symbol.padEnd(6)} score:${String(Math.round(r.score)).padStart(3)}  vol:${vol.padStart(5)}  rsi:${String(r.rsi?.toFixed(0) ?? '?').padStart(3)}  4w:${roc}`;
+    }).join('\n');
+
+    const newsList = articles.slice(0, 40).map(a => {
+        const tks  = a.tickers ? ` [${a.tickers}]` : '';
+        const sent = a.sentiment_score != null ? ` (${a.sentiment_score >= 0 ? '+' : ''}${a.sentiment_score.toFixed(2)})` : '';
+        return `  ${a.published_at.slice(0, 10)} ${a.title}${tks}${sent}`;
+    }).join('\n');
+
+    const systemPrompt = `You are a senior semiconductor sector analyst writing a market-close briefing for a portfolio manager. Analyze what happened today. Plain text only, no markdown, no bullet symbols. Keep the entire response under 1800 characters.`;
+
+    const userPrompt = `NYSE CLOSE — ${dateStr}
+
+TRACKED STOCKS (vol_ratio = 4-week avg / prior 10-week avg volume):
+${stockTable}
+
+TODAY'S NEWS (${articles.length} articles):
+${newsList}
+
+Write a close briefing with exactly these four labeled sections:
+
+VOLUME: Top 3 stocks by unusual volume (highest and lowest vol_ratio outliers). State each ratio.
+
+STORIES: 2-3 trending narratives driving the sector today based on the news.
+
+SMART MONEY: Analyst upgrades/downgrades, institutional position changes, insider trades, or notable fund/bank commentary visible in today's news. If none found, say so.
+
+WATCH: 1-2 specific tickers or themes to monitor at tomorrow's open.
+
+Plain text only. Specific tickers. Under 1800 characters total.`;
+
+    return { systemPrompt, userPrompt };
+}
 
 // Uses TIME_SERIES_WEEKLY_ADJUSTED (free tier): full history, split-adjusted prices.
 // "5. adjusted close" corrects for stock splits (e.g. NVDA 10:1 in Jun 2024, AVGO 10:1 in Jul 2024).
@@ -660,9 +784,66 @@ const server = http.createServer(async (req, res) => {
             .then(() => {
                 console.log('[bell] Bell sequence complete');
                 db.setMeta('bell_last_success', new Date().toISOString());
+                const summary = buildBellSummary();
+                return notifyGreen(summary);
             })
             .catch(err => console.error('[bell] Error:', err.message))
             .finally(() => { _bellRunning = false; });
+        return;
+    }
+
+    // POST /api/close — market-close sequence: fetch news, Claude analysis, Signal notification
+    if (pathname === '/api/close' && req.method === 'POST') {
+        if (_closeRunning) {
+            json(res, { skipped: true, reason: 'Close analysis already in progress' });
+            return;
+        }
+        _closeRunning = true;
+        json(res, { triggered: true, startedAt: new Date().toISOString() });
+        console.log('[close] Market-close analysis started');
+
+        (async () => {
+            try {
+                const symbols = STOCKS.map(s => s.symbol).filter(s => s !== 'HXSCL');
+                console.log('[close] Fetching combined news...');
+                const articles = await fetchCombinedMedia(symbols);
+                console.log(`[close] ${articles.length} articles fetched`);
+
+                const indicators = db.getLatestIndicators();
+                const { systemPrompt, userPrompt } = buildClosePrompt(indicators, articles);
+
+                let claudeOutput = '';
+                const accumulator = {
+                    write(chunk) {
+                        if (typeof chunk !== 'string') return;
+                        for (const line of chunk.split('\n')) {
+                            if (!line.startsWith('data: ') || line.slice(6) === '[DONE]') continue;
+                            try { const e = JSON.parse(line.slice(6)); if (e.text) claudeOutput += e.text; }
+                            catch { /* ignore */ }
+                        }
+                    }
+                };
+
+                console.log('[close] Running Claude analysis...');
+                await streamClaude(systemPrompt, userPrompt, accumulator);
+
+                if (claudeOutput.trim()) {
+                    db.setMeta('close_last_analysis', claudeOutput.trim());
+                    db.setMeta('close_last_success', new Date().toISOString());
+                    const dateStr = new Date().toLocaleDateString('en-US', {
+                        timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric',
+                    });
+                    await notifyGreen(`NYSE close — ${dateStr}\n\n${claudeOutput.trim()}`);
+                    console.log('[close] Analysis complete and sent');
+                } else {
+                    console.error('[close] Claude returned empty output');
+                }
+            } catch (err) {
+                console.error('[close] Error:', err.message);
+            } finally {
+                _closeRunning = false;
+            }
+        })();
         return;
     }
 
@@ -675,8 +856,12 @@ const server = http.createServer(async (req, res) => {
                 jobs: config.jobs.map(job => ({
                     ...job,
                     lastRun:     db.getLastSchedulerRun(job.id),
-                    lastSuccess: job.id === 'market-open-bell' ? db.getMeta('bell_last_success') : null,
-                    running:     job.id === 'market-open-bell' ? _bellRunning : false,
+                    lastSuccess: job.id === 'market-open-bell' ? db.getMeta('bell_last_success')
+                               : job.id === 'market-close'     ? db.getMeta('close_last_success')
+                               : null,
+                    running:     job.id === 'market-open-bell' ? _bellRunning
+                               : job.id === 'market-close'     ? _closeRunning
+                               : false,
                 })),
             });
         } catch (err) {
