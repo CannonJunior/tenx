@@ -406,7 +406,7 @@ const ModelView = {
                     mode: 'index', intersect: false,
                     backgroundColor:'#161B22', borderColor:'#30363D', borderWidth:1,
                     titleColor:'#E6EDF3', bodyColor:'#8B949E',
-                    callbacks: { title: items => new Date(items[0].label).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}) }
+                    callbacks: { title: items => new Date(items[0].parsed.x).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}) }
                 }
             },
             scales: {
@@ -622,7 +622,7 @@ const ModelView = {
                         backgroundColor: '#161B22', borderColor: '#30363D', borderWidth: 1,
                         titleColor: '#E6EDF3', bodyColor: '#8B949E',
                         callbacks: {
-                            title: items => new Date(items[0].label)
+                            title: items => new Date(items[0].parsed.x)
                                 .toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
                         }
                     }

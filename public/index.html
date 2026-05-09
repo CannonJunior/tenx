@@ -29,6 +29,26 @@
             Fetch All Data
         </button>
 
+        <!-- Notification bell -->
+        <div id="notifWrap" class="notif-wrap">
+            <button id="btnNotif" class="btn-notif" title="Signal chat notifications">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                    <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                </svg>
+                <span id="notifBadge" class="notif-badge hidden">0</span>
+            </button>
+            <div id="notifPanel" class="notif-panel hidden">
+                <div class="notif-panel-hdr">
+                    <span class="notif-panel-title">Signal Chats</span>
+                    <button id="notifMarkRead" class="notif-mark-read">Mark all read</button>
+                </div>
+                <div id="notifList" class="notif-list">
+                    <div class="notif-empty">No Signal chats sent yet.</div>
+                </div>
+            </div>
+        </div>
+
         <!-- Settings -->
         <div id="settingsWrap" class="settings-wrap">
             <button id="btnSettings" class="btn-settings" title="Settings">
@@ -285,6 +305,7 @@
 <script src="js/advanced.js"></script>
 <script src="js/floating-cards.js"></script>
 <script src="js/card-stack.js"></script>
+<script src="js/vol-cards.js"></script>
 <script src="js/models-view.js"></script>
 </body>
 </html>

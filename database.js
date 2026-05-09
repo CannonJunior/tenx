@@ -165,6 +165,15 @@ db.exec(`
         status       TEXT NOT NULL,
         message      TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        type       TEXT NOT NULL,
+        message    TEXT NOT NULL,
+        symbols    TEXT NOT NULL DEFAULT '[]',
+        read       INTEGER NOT NULL DEFAULT 0
+    );
 `);
 
 // ── Schema migrations (idempotent) ────────────────────────────────────
@@ -205,6 +214,7 @@ db.exec(`
     CREATE INDEX IF NOT EXISTS idx_transcripts_sym  ON transcripts(symbol, filed_date DESC);
     CREATE INDEX IF NOT EXISTS idx_ts_sym           ON transcript_signals(symbol, filed_date ASC);
     CREATE INDEX IF NOT EXISTS idx_scheduler_log    ON scheduler_log(job_id, triggered_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_notifications    ON notifications(created_at DESC);
 `);
 
 // ── Pre-compiled statements ───────────────────────────────────────────
@@ -213,6 +223,12 @@ const _saveFetchLog          = db.prepare('INSERT OR REPLACE INTO fetch_log (sym
 const _getPrices             = db.prepare('SELECT date,close,volume FROM daily_prices WHERE symbol=? AND date>=? ORDER BY date ASC');
 const _getPricesAll          = db.prepare('SELECT date,close,volume FROM daily_prices WHERE symbol=? ORDER BY date ASC');
 const _hasPrices             = db.prepare('SELECT COUNT(*) as n FROM daily_prices WHERE symbol=?');
+const _hasVolumeData         = db.prepare('SELECT COUNT(*) as n FROM daily_prices WHERE symbol=? AND volume > 0');
+const _getLastPriceDate      = db.prepare('SELECT MAX(date) as d FROM daily_prices WHERE symbol=?');
+const _touchFetchLog         = db.prepare(
+    'INSERT INTO fetch_log (symbol,last_fetched,status,row_count) VALUES (?,?,?,0) ' +
+    'ON CONFLICT(symbol) DO UPDATE SET last_fetched=excluded.last_fetched, status=excluded.status'
+);
 const _getFetchLog           = db.prepare('SELECT * FROM fetch_log WHERE symbol=?');
 const _clearPricesData       = db.prepare('DELETE FROM daily_prices WHERE symbol=?');
 const _clearFetchLog         = db.prepare('DELETE FROM fetch_log WHERE symbol=?');
@@ -279,6 +295,10 @@ const _edgarRange            = db.prepare('SELECT MIN(filed_date) as first, MAX(
 const _saveSchedulerRun      = db.prepare('INSERT INTO scheduler_log (job_id, status, message) VALUES (?, ?, ?)');
 const _getLastSchedulerRun   = db.prepare('SELECT * FROM scheduler_log WHERE job_id=? ORDER BY triggered_at DESC LIMIT 1');
 const _getSchedulerLog       = db.prepare('SELECT * FROM scheduler_log ORDER BY triggered_at DESC LIMIT ?');
+const _saveNotification      = db.prepare('INSERT INTO notifications (type, message, symbols) VALUES (?, ?, ?)');
+const _getNotifications      = db.prepare('SELECT * FROM notifications ORDER BY created_at DESC LIMIT ?');
+const _markAllNotifsRead     = db.prepare('UPDATE notifications SET read = 1 WHERE read = 0');
+const _unreadNotifCount      = db.prepare('SELECT COUNT(*) as n FROM notifications WHERE read = 0');
 
 module.exports = {
     savePrices(symbol, prices) {
@@ -300,6 +320,19 @@ module.exports = {
 
     hasPrices(symbol) {
         return _hasPrices.get(symbol).n > 0;
+    },
+
+    hasVolumeData(symbol) {
+        return _hasVolumeData.get(symbol).n > 0;
+    },
+
+    getLastPriceDate(symbol) {
+        return _getLastPriceDate.get(symbol)?.d ?? null;
+    },
+
+    // Update last_fetched timestamp without changing row_count (used when fetch is skipped)
+    touchFetchLog(symbol) {
+        _touchFetchLog.run(symbol, new Date().toISOString(), 'current');
     },
 
     getFetchLog(symbol) {
@@ -519,5 +552,24 @@ module.exports = {
 
     getSchedulerLog(limit = 50) {
         return _getSchedulerLog.all(limit);
+    },
+
+    saveNotification(type, message, symbols) {
+        _saveNotification.run(type, message, JSON.stringify(symbols ?? []));
+    },
+
+    getNotifications(limit = 100) {
+        return _getNotifications.all(limit).map(n => ({
+            ...n,
+            symbols: JSON.parse(n.symbols || '[]'),
+        }));
+    },
+
+    markAllNotificationsRead() {
+        _markAllNotifsRead.run();
+    },
+
+    getUnreadNotificationCount() {
+        return _unreadNotifCount.get().n;
     },
 };

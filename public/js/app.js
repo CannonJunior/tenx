@@ -173,6 +173,7 @@ const state = {
     panels:  { shortlist: [], watchlist: [], marketcap: [] },
     prices:  {},
     charts:  {},
+    volCharts: {},
     compareChart: null,
     view:    'grid',
     pollTimer: null,
@@ -327,6 +328,7 @@ function buildCard(stock, ctx = '') {
                 </button>
             </div>
         </div>
+        <div id="vol-${sid}" class="vol-section hidden" data-symbol="${stock.symbol}" data-ctx="${ctx}"></div>
         <div id="stale-${sid}" class="card-stale-banner${staleNow ? '' : ' hidden'}">
             <span class="stale-age">${buildAgeText(stock)}</span>
             <button class="fetch-btn" onclick="fetchOne('${stock.symbol}')">
@@ -344,6 +346,15 @@ function buildCard(stock, ctx = '') {
     card.addEventListener('dblclick', e => {
         if (e.target.closest('button, a, .adv-section, select, input')) return;
         if (typeof FloatingCards !== 'undefined') FloatingCards.open(stock, sid);
+    });
+
+    // Clicking the card body dismisses its notification dot
+    card.addEventListener('click', e => {
+        if (e.target.closest('button, a, input, select, .adv-section, .vol-section')) return;
+        if (notifState.pendingDots.has(stock.symbol)) {
+            notifState.pendingDots.delete(stock.symbol);
+            updateCardNotifDots();
+        }
     });
 
     return card;
@@ -409,7 +420,7 @@ function renderCardChart(symbol, ctx = '') {
                     bodyColor: '#8B949E',
                     callbacks: {
                         title: items => {
-                            const d = new Date(items[0].label);
+                            const d = new Date(items[0].parsed.x);
                             return d.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
                         },
                         label: item => `$${item.raw.toFixed(2)}`,
@@ -462,7 +473,163 @@ function renderCardChart(symbol, ctx = '') {
     $(`range-${sid}`).textContent = `${fmtDate(first)} – ${fmtDate(end)}`;
     $(`pts-${sid}`).textContent   = `${prices.length} days`;
 
+    // Volume chart section — shown for any stock that has volume data in state
+    const hasVolData = (state.prices[symbol] || []).some(p => (p.volume || 0) > 0);
+    if (hasVolData) {
+        if (state.volCharts[sid]) { state.volCharts[sid].destroy(); delete state.volCharts[sid]; }
+        const volSec = $(`vol-${sid}`);
+        if (volSec) {
+            volSec.innerHTML = `
+                <div class="vol-section-hdr">
+                    <button class="vol-toggle" onclick="toggleVolumeSection('${sid}')">
+                        <span>Volume</span>
+                        <svg class="vol-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+                    </button>
+                    <button class="vol-expand-btn" title="Open expanded volume chart" onclick="FloatingVolCards.open('${symbol}','${ctx}')">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                    </button>
+                </div>
+                <div class="vol-canvas-wrap hidden" id="vol-wrap-${sid}">
+                    <canvas id="vol-canvas-${sid}"></canvas>
+                </div>`;
+            volSec.classList.remove('hidden');
+            delete volSec.dataset.rendered;
+        }
+    }
+
     updateCardFreshness(symbol, ctx);
+}
+
+// ── Volume chart ──────────────────────────────────────────────────────
+function toggleVolumeSection(sid) {
+    const volSec = $(`vol-${sid}`);
+    const wrap   = $(`vol-wrap-${sid}`);
+    if (!wrap || !volSec) return;
+    const opening = wrap.classList.contains('hidden');
+    wrap.classList.toggle('hidden', !opening);
+    volSec.querySelector('.vol-chevron')?.classList.toggle('rotated', opening);
+    if (opening) {
+        if (!volSec.dataset.rendered) {
+            volSec.dataset.rendered = '1';
+            requestAnimationFrame(() =>
+                doRenderVolumeChart(volSec.dataset.symbol, volSec.dataset.ctx || '')
+            );
+        } else {
+            state.volCharts[sid]?.resize();
+        }
+    }
+}
+
+function doRenderVolumeChart(symbol, ctx) {
+    const sid    = (ctx || '') + symbol;
+    const canvas = $(`vol-canvas-${sid}`);
+    if (!canvas) return;
+    const allPrices = state.prices[symbol];
+    if (!allPrices?.length) return;
+
+    const windowMonths = typeof settings !== 'undefined' ? settings.dataWindow : 24;
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - windowMonths);
+    const cutStr = cutoff.toISOString().split('T')[0];
+    const prices = allPrices.filter(p => p.date >= cutStr && (p.volume || 0) > 0);
+    if (!prices.length) return;
+
+    const allStocksArr = [...state.stocks, ...Object.values(state.panels).flat()];
+    const stock  = allStocksArr.find(s => s.symbol === symbol);
+    const upColor = rgba(getGrowthColor(stock?.estYearGrowth), 0.55);
+    const dnColor = 'rgba(248,81,73,0.65)';
+
+    // Red bar if this week's close is lower than the previous week's close
+    const barColors = prices.map((p, i) =>
+        i > 0 && p.close < prices[i - 1].close ? dnColor : upColor
+    );
+
+    const volData = prices.map(p => ({ x: new Date(p.date), y: p.volume / 1_000_000 }));
+    const avgVol  = volData.reduce((s, p) => s + p.y, 0) / volData.length;
+    const avgData = prices.map(p => ({ x: new Date(p.date), y: avgVol }));
+
+    state.volCharts[sid]?.destroy();
+    state.volCharts[sid] = new Chart(canvas, {
+        type: 'bar',
+        data: {
+            datasets: [
+                {
+                    data: volData,
+                    backgroundColor: barColors,
+                    borderWidth: 0,
+                    borderRadius: 0,
+                    barPercentage: 1.0,
+                    categoryPercentage: 1.0,
+                    order: 1,
+                },
+                {
+                    type: 'line',
+                    data: avgData,
+                    borderColor: 'rgba(234,179,8,1)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: false,
+                    tension: 0,
+                    order: 0,
+                }
+            ]
+        },
+        plugins: [{
+            id: 'avgGlow',
+            beforeDatasetDraw(chart, args) {
+                if (args.index !== 1) return;
+                chart.ctx.save();
+                chart.ctx.shadowColor = 'rgba(234,179,8,0.7)';
+                chart.ctx.shadowBlur  = 10;
+            },
+            afterDatasetDraw(chart, args) {
+                if (args.index !== 1) return;
+                chart.ctx.restore();
+            }
+        }],
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    mode: 'index',
+                    intersect: false,
+                    backgroundColor: '#161B22',
+                    borderColor: '#30363D',
+                    borderWidth: 1,
+                    titleColor: '#E6EDF3',
+                    bodyColor: '#8B949E',
+                    callbacks: {
+                        title: items => new Date(items[0].parsed.x).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }),
+                        label: item => item.datasetIndex === 0
+                            ? `Vol: ${item.raw.y.toFixed(1)}M`
+                            : `Avg: ${item.raw.y.toFixed(1)}M`,
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    type: 'time',
+                    time: { unit: 'month', displayFormats: { month: 'MMM yy' } },
+                    grid:  { display: false },
+                    ticks: { display: false },
+                    border: { color: '#30363D' },
+                },
+                y: {
+                    position: 'right',
+                    grid:   { color: '#21262D' },
+                    ticks:  {
+                        color: '#6E7681',
+                        maxTicksLimit: 3,
+                        callback: v => v >= 1 ? v.toFixed(0) + 'M' : (v * 1000).toFixed(0) + 'K',
+                    },
+                    border: { color: '#30363D' },
+                }
+            }
+        }
+    });
 }
 
 // ── Compare chart ─────────────────────────────────────────────────────
@@ -520,7 +687,7 @@ function renderCompareChart() {
                     bodyColor: '#8B949E',
                     callbacks: {
                         title: items => {
-                            const d = new Date(items[0].label);
+                            const d = new Date(items[0].parsed.x);
                             return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
                         },
                         label: item => `${item.dataset.label}: ${item.raw.y.toFixed(1)}  (${item.raw.y >= 100 ? '+' : ''}${(item.raw.y-100).toFixed(1)}%)`,
@@ -729,6 +896,7 @@ function renderPanelCards(name) {
     for (const stock of (state.panels[name] || [])) {
         if (state.prices[stock.symbol]?.length > 0) renderCardChart(stock.symbol, ctx);
     }
+    updateCardNotifDots();
 }
 
 function buildPanelWidget(name) {
@@ -753,6 +921,8 @@ function buildPanelWidget(name) {
             <div class="panel-card-grid" id="panel-grid-${name}"></div>
         </div>`;
 
+    const body = widget.querySelector('.panel-widget-body');
+    if (body) makeResizableY(body, { prop: 'maxHeight', min: 80, storageKey: `tenx-pw-${name}-h` });
     setupWidgetDrag(widget);
     return widget;
 }
@@ -884,6 +1054,189 @@ function updateEmptyColumns() {
     }
 }
 
+// ── Notifications ─────────────────────────────────────────────────────
+const notifState = { data: [], pendingDots: new Set(), maxSeenId: 0 };
+
+async function loadNotifications() {
+    try {
+        const r = await fetch('/api/notifications');
+        const d = await r.json();
+        const incoming  = d.notifications || [];
+        const firstLoad = notifState.maxSeenId === 0;
+        for (const n of incoming) {
+            const isNew = n.id > notifState.maxSeenId;
+            if (firstLoad ? !n.read : isNew)
+                for (const sym of (n.symbols || [])) notifState.pendingDots.add(sym);
+        }
+        if (incoming.length)
+            notifState.maxSeenId = Math.max(notifState.maxSeenId, ...incoming.map(n => n.id));
+        notifState.data = incoming;
+        updateNotifBadge();
+        updateNotifPanel();
+        updateCardNotifDots();
+    } catch { /* silently ignore */ }
+}
+
+function updateNotifBadge() {
+    const badge = $('notifBadge');
+    if (!badge) return;
+    const unread = notifState.data.filter(n => !n.read).length;
+    badge.textContent = unread > 9 ? '9+' : String(unread);
+    badge.classList.toggle('hidden', unread === 0);
+}
+
+function updateNotifPanel() {
+    const list = $('notifList');
+    if (!list) return;
+    if (!notifState.data.length) {
+        list.innerHTML = '<div class="notif-empty">No Signal chats sent yet.</div>';
+        return;
+    }
+    list.innerHTML = notifState.data.map(n => {
+        const d       = new Date(n.created_at.includes('T') ? n.created_at : n.created_at.replace(' ','T') + 'Z');
+        const timeStr = d.toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+        const chips   = (n.symbols || []).map(s => `<span class="notif-sym-chip">${s}</span>`).join('');
+        const msgHtml = n.message.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        return `<div class="notif-item${n.read ? '' : ' notif-unread'}">
+            <div class="notif-item-hdr">
+                <span class="notif-type notif-type-${n.type}">${n.type === 'bell' ? 'Market Open' : 'Market Close'}</span>
+                <span class="notif-time">${timeStr}</span>
+            </div>
+            ${chips ? `<div class="notif-syms">${chips}</div>` : ''}
+            <div class="notif-msg">${msgHtml}</div>
+        </div>`;
+    }).join('');
+}
+
+function updateCardNotifDots() {
+    document.querySelectorAll('.chart-card').forEach(card => {
+        const symEl = card.querySelector('.card-symbol');
+        if (!symEl) return;
+        const sym     = symEl.textContent.trim();
+        const pending = notifState.pendingDots.has(sym);
+
+        // Dot inside symbol text
+        symEl.querySelector('.card-notif-dot')?.remove();
+        if (pending)
+            symEl.insertAdjacentHTML('beforeend',
+                '<span class="card-notif-dot" title="Mentioned in recent Signal chat"></span>');
+
+        // Enable Advanced Analysis button (only if not already enabled)
+        card.querySelector('.adv-enable-btn-wrap')?.remove();
+        if (pending && !(settings.advancedStocks || []).includes(sym)) {
+            const wrap = document.createElement('div');
+            wrap.className = 'adv-enable-btn-wrap';
+            wrap.innerHTML = `<button class="adv-enable-btn">Enable Advanced Analysis for ${sym}</button>`;
+            wrap.querySelector('button').addEventListener('click', e => {
+                e.stopPropagation();
+                if (typeof setAdvancedEnabled === 'function') setAdvancedEnabled(sym, true);
+                wrap.remove();
+                updateCardNotifDots();
+            });
+            const advSec = card.querySelector('.adv-section');
+            advSec ? card.insertBefore(wrap, advSec) : card.appendChild(wrap);
+        }
+
+        // Signal chats in Advanced Analysis section
+        if (typeof updateAdvSignalForCard === 'function') updateAdvSignalForCard(card, sym);
+    });
+}
+
+async function markNotificationsRead() {
+    try {
+        await fetch('/api/notifications/read', { method: 'POST' });
+        notifState.data.forEach(n => { n.read = 1; });
+        updateNotifBadge();
+        updateNotifPanel();
+        // Card dots persist until the card is clicked — intentionally not cleared here
+    } catch { /* silently ignore */ }
+}
+
+function startNotifPolling() {
+    loadNotifications();
+    setInterval(loadNotifications, 30000);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) loadNotifications();
+    });
+    const btn = $('btnNotif');
+    if (btn) {
+        btn.addEventListener('click', e => {
+            e.stopPropagation();
+            const panel   = $('notifPanel');
+            const opening = panel.classList.contains('hidden');
+            panel.classList.toggle('hidden', !opening);
+            btn.classList.toggle('active', opening);
+            if (opening) markNotificationsRead();
+        });
+    }
+    $('notifMarkRead')?.addEventListener('click', markNotificationsRead);
+    document.addEventListener('click', e => {
+        if (!$('notifWrap')?.contains(e.target)) {
+            $('notifPanel')?.classList.add('hidden');
+            $('btnNotif')?.classList.remove('active');
+        }
+    });
+}
+
+// ── Resizable height containers ────────────────────────────────────────
+// Right-click + drag the bottom edge of a container to resize its height.
+// prop: CSS property to set ('maxHeight' or 'height')
+// Sizes persist across page loads via localStorage when storageKey is given.
+function makeResizableY(el, { prop = 'maxHeight', min = 100, storageKey = null } = {}) {
+    if (!el || el.dataset.resizableY) return;
+    el.dataset.resizableY = '1';
+
+    if (storageKey) {
+        const saved = localStorage.getItem(storageKey);
+        if (saved) el.style[prop] = saved + 'px';
+    }
+
+    const ZONE = 10;
+
+    el.addEventListener('mousemove', e => {
+        if (document.body.classList.contains('is-resizing-y')) return;
+        const r = el.getBoundingClientRect();
+        el.style.cursor = e.clientY >= r.bottom - ZONE ? 'ns-resize' : '';
+    });
+
+    el.addEventListener('mouseleave', () => {
+        if (!document.body.classList.contains('is-resizing-y')) el.style.cursor = '';
+    });
+
+    el.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
+        const r = el.getBoundingClientRect();
+        if (e.clientY < r.bottom - ZONE || r.height < 1) return;
+
+        e.preventDefault();
+
+        const startY = e.clientY, startVal = r.height;
+        let moved = false;
+
+        document.body.classList.add('is-resizing-y');
+
+        const onMove = ev => {
+            moved = true;
+            el.style[prop] = Math.max(min, startVal + (ev.clientY - startY)) + 'px';
+        };
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.classList.remove('is-resizing-y');
+            el.style.cursor = '';
+            if (moved) {
+                requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+                if (storageKey) {
+                    const v = parseInt(el.style[prop]);
+                    if (!isNaN(v)) localStorage.setItem(storageKey, String(v));
+                }
+            }
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+}
+
 // ── Init ──────────────────────────────────────────────────────────────
 async function init() {
     $('footerDate').textContent = new Date().toLocaleDateString('en-US', { dateStyle: 'medium' });
@@ -915,6 +1268,9 @@ async function init() {
     // Render panel column structure, then wire up drop zones once
     renderPanels();
     setupDropZones();
+    makeResizableY($('leftCol'),  { prop: 'maxHeight', min: 120, storageKey: 'tenx-lc-h' });
+    makeResizableY($('rightCol'), { prop: 'maxHeight', min: 120, storageKey: 'tenx-rc-h' });
+    makeResizableY(document.querySelector('.compare-chart-wrap'), { prop: 'height', min: 200, storageKey: 'tenx-cmp-h' });
     const allPanels = [...(panelConfig.columns.left || []), ...(panelConfig.columns.right || [])];
     for (const name of allPanels) {
         loadPanelData(name).then(() => renderPanelCards(name));
@@ -928,6 +1284,8 @@ async function init() {
     } else {
         showStatus(`${loaded} of ${state.stocks.length} stocks loaded. Click "Fetch All Data" to get the rest.`, 'info');
     }
+
+    startNotifPolling();
 }
 
 init();

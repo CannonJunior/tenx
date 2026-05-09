@@ -57,6 +57,7 @@ function toggleAdvanced(sid, symbol) {
         wrap.dataset.loaded = 'true';
         loadAdvancedStatus(symbol, sid);
     }
+    if (!open && typeof updateCardNotifDots === 'function') updateCardNotifDots();
 }
 
 // ── Load button states + any cached inference result ─────────────────
@@ -203,10 +204,16 @@ async function advFetch(symbol, sid) {
                 renderCardChart(symbol, name + '_');
             }
         }
-        // Trigger model recompute in background
-        fetch('/api/compute-models', { method: 'POST' }).catch(() => {});
         applyBtnState(`adv-fetch-${sid}`, `adv-fetch-count-${sid}`, 1, formatDate(new Date().toISOString()));
-        advShowResult(sid, `<div class="adv-success">✓ Loaded ${data.count} weeks of price data. Models recomputing…</div>`);
+        if (data.skipped) {
+            advShowResult(sid, `<div class="adv-success">✓ Already current through ${data.lastDate} — no fetch needed.</div>`);
+        } else {
+            fetch('/api/compute-models', { method: 'POST' }).catch(() => {});
+            const msg = data.count > 0
+                ? `✓ ${data.count} new week${data.count === 1 ? '' : 's'} added through ${data.lastDate}. Models recomputing…`
+                : `✓ No new records beyond existing data. Models recomputing…`;
+            advShowResult(sid, `<div class="adv-success">${msg}</div>`);
+        }
     } catch(err) {
         advShowResult(sid, `<div class="adv-error">Fetch failed: ${err.message}</div>`);
     }
@@ -345,6 +352,42 @@ function advRenderMd(md) {
         .replace(/^(?!<[hul]|<\/[hul])(.+)$/gm, '$1')
         .replace(/^/, '<p>')
         .replace(/$/, '</p>');
+}
+
+// ── Signal chat section inside Advanced Analysis ──────────────────────
+// Injects relevant Signal chats above the action buttons when the adv body is open.
+function updateAdvSignalForCard(card, sym) {
+    const advSec  = card.querySelector('.adv-section');
+    if (!advSec || advSec.classList.contains('hidden')) return;
+    const advBody = advSec.querySelector('.adv-body');
+    if (!advBody || advBody.classList.contains('hidden')) return;
+
+    const relNotifs = typeof notifState !== 'undefined'
+        ? notifState.data.filter(n => (n.symbols || []).includes(sym))
+        : [];
+
+    let section = advSec.querySelector('.adv-signal-section');
+    if (!relNotifs.length) { section?.remove(); return; }
+
+    if (!section) {
+        section = document.createElement('div');
+        section.className = 'adv-signal-section';
+        const btnGrid = advBody.querySelector('.adv-btn-grid');
+        btnGrid ? advBody.insertBefore(section, btnGrid) : advBody.prepend(section);
+    }
+
+    section.innerHTML = '<div class="adv-signal-title">Signal Chats</div>' +
+        relNotifs.map(n => {
+            const dt = new Date(n.created_at.includes('T') ? n.created_at : n.created_at.replace(' ','T') + 'Z');
+            const ts = dt.toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+            return `<div class="adv-signal-item">
+                <div class="adv-signal-hdr">
+                    <span class="notif-type notif-type-${n.type}">${n.type === 'bell' ? 'Market Open' : 'Market Close'}</span>
+                    <span class="adv-signal-time">${ts}</span>
+                </div>
+                <div class="adv-signal-msg">${escHtml(n.message)}</div>
+            </div>`;
+        }).join('');
 }
 
 // ── Settings integration ──────────────────────────────────────────────

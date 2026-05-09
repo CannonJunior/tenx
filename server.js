@@ -239,6 +239,22 @@ const WATCHLIST = [
     { symbol: 'APP',  name: 'AppLovin Corporation',  subIndustry: 'AI Advertising',    estYearGrowth: 18, gain12m: 275 },
 ];
 
+// All symbols tracked across every list — used to extract mentions from Signal chats
+const ALL_TRACKED_SYMBOLS = new Set([
+    ...STOCKS.map(s => s.symbol),
+    ...WATCHLIST.map(s => s.symbol),
+    ...SHORTLIST.map(s => s.symbol),
+    ...MARKETCAP.map(s => s.symbol),
+]);
+
+// Extract known ticker symbols from plain text (all-caps, 2–6 chars)
+function extractSymbols(text) {
+    const found = new Set();
+    for (const m of (text.match(/\b[A-Z]{2,6}\b/g) || []))
+        if (ALL_TRACKED_SYMBOLS.has(m)) found.add(m);
+    return [...found];
+}
+
 const MIME = {
     '.html': 'text/html',
     '.js':   'text/javascript',
@@ -271,18 +287,47 @@ async function processQueue() {
     queueRunning = true;
     while (fetchQueue.length > 0) {
         const { symbol, resolve, reject } = fetchQueue.shift();
+        let madeApiCall = false;
         try {
-            console.log(`[fetch] ${symbol}`);
-            const prices = await fetchFromAlphaVantage(symbol);
-            db.savePrices(symbol, prices);
-            console.log(`[saved] ${symbol}: ${prices.length} records`);
-            resolve({ success: true, symbol, count: prices.length });
+            // Skip if data is from the current trading week (< 7 days) AND volume is already
+            // present. TIME_SERIES_WEEKLY_ADJUSTED updates once per completed week, so fetching
+            // sooner returns the same data and wastes one of the 25 daily API calls.
+            // If volume is missing (legacy rows with volume=0), always fetch so INSERT OR REPLACE
+            // backfills the volume column on existing rows.
+            const lastDate      = db.getLastPriceDate(symbol);
+            const daysSinceLast = lastDate
+                ? (Date.now() - new Date(lastDate).getTime()) / 86400000
+                : Infinity;
+            const hasVolume     = db.hasVolumeData(symbol);
+
+            if (daysSinceLast < 7 && hasVolume) {
+                console.log(`[fetch] ${symbol} — current through ${lastDate}, skipped`);
+                resolve({ success: true, symbol, count: 0, skipped: true, lastDate });
+            } else {
+                madeApiCall = true;
+                const reason = !hasVolume && lastDate ? 'volume backfill' : `last: ${lastDate ?? 'none'}`;
+                console.log(`[fetch] ${symbol} (${reason})`);
+                const prices = await fetchFromAlphaVantage(symbol);
+                // Full save when volume is missing so INSERT OR REPLACE updates existing rows.
+                // Incremental save otherwise — only records newer than what we have.
+                const toSave = (hasVolume && lastDate) ? prices.filter(p => p.date > lastDate) : prices;
+                if (toSave.length > 0) {
+                    db.savePrices(symbol, toSave);
+                    console.log(`[saved] ${symbol}: ${toSave.length} records`);
+                } else {
+                    // API returned nothing new — touch the log so freshness clock resets
+                    db.touchFetchLog(symbol);
+                    console.log(`[fetch] ${symbol}: no new records from API`);
+                }
+                const newLastDate = toSave.length ? toSave[toSave.length - 1].date : lastDate;
+                resolve({ success: true, symbol, count: toSave.length, lastDate: newLastDate });
+            }
         } catch (err) {
             console.error(`[error] ${symbol}:`, err.message);
             reject(err);
         }
-        if (fetchQueue.length > 0) {
-            // 13 s gap keeps us under 5 req/min
+        // Only wait between requests when we actually called the API
+        if (madeApiCall && fetchQueue.length > 0) {
             await sleep(13000);
         }
     }
@@ -785,6 +830,7 @@ const server = http.createServer(async (req, res) => {
                 console.log('[bell] Bell sequence complete');
                 db.setMeta('bell_last_success', new Date().toISOString());
                 const summary = buildBellSummary();
+                db.saveNotification('bell', summary, extractSymbols(summary));
                 return notifyGreen(summary);
             })
             .catch(err => console.error('[bell] Error:', err.message))
@@ -833,7 +879,9 @@ const server = http.createServer(async (req, res) => {
                     const dateStr = new Date().toLocaleDateString('en-US', {
                         timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric',
                     });
-                    await notifyGreen(`NYSE close — ${dateStr}\n\n${claudeOutput.trim()}`);
+                    const closeMsg = `NYSE close — ${dateStr}\n\n${claudeOutput.trim()}`;
+                    db.saveNotification('close', closeMsg, extractSymbols(closeMsg));
+                    await notifyGreen(closeMsg);
                     console.log('[close] Analysis complete and sent');
                 } else {
                     console.error('[close] Claude returned empty output');
@@ -844,6 +892,19 @@ const server = http.createServer(async (req, res) => {
                 _closeRunning = false;
             }
         })();
+        return;
+    }
+
+    // GET /api/notifications — list of Signal chat notifications
+    if (pathname === '/api/notifications') {
+        json(res, { notifications: db.getNotifications(100) });
+        return;
+    }
+
+    // POST /api/notifications/read — mark all notifications as read
+    if (pathname === '/api/notifications/read' && req.method === 'POST') {
+        db.markAllNotificationsRead();
+        json(res, { ok: true });
         return;
     }
 
