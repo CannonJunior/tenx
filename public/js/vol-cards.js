@@ -39,7 +39,7 @@ const FloatingVolCards = (() => {
         <div class="fvc-titlebar" id="fvc-tbar-${id}">
             <div class="fvc-drag-handle">
                 <span style="color:${color};font-size:18px;font-weight:700;line-height:1">${symbol}</span>
-                <span style="font-size:11px;color:var(--text3)">Volume</span>
+                <span style="font-size:11px;color:var(--text3)">Daily Volume</span>
             </div>
             <div class="fvc-controls">
                 <button class="fvc-btn" id="fvc-pin-${id}"
@@ -57,18 +57,47 @@ const FloatingVolCards = (() => {
                 </button>
             </div>
         </div>
-        <div class="fvc-canvas-wrap">
-            <canvas id="vol-canvas-${fvcCtx}${symbol}"></canvas>
-        </div>`;
+        <div class="fvc-canvas-wrap" id="fvc-wrap-${id}">
+            <div class="fvc-loading" id="fvc-loading-${id}">
+                <div class="spinner-inline"></div>
+                <span>Loading daily data…</span>
+            </div>
+            <canvas id="vol-canvas-${fvcCtx}${symbol}" style="display:none"></canvas>
+        </div>
+        <div class="vol-model hidden" id="vol-model-${fvcCtx}${symbol}"></div>`;
 
         document.body.appendChild(el);
         cards[id] = { el, symbol, origCtx: origCtx || '', fvcCtx, pinned: false };
 
-        requestAnimationFrame(() => {
-            if (typeof doRenderVolumeChart === 'function') {
-                doRenderVolumeChart(symbol, fvcCtx);
-            }
-        });
+        // Fetch daily vol data, then render
+        fetch(`/api/daily-vol?symbol=${encodeURIComponent(symbol)}`)
+            .then(r => r.json())
+            .then(data => {
+                if (!cards[id]) return;  // card was closed while loading
+                const loading = document.getElementById(`fvc-loading-${id}`);
+                const canvas  = document.getElementById(`vol-canvas-${fvcCtx}${symbol}`);
+
+                if (!data.prices?.length) {
+                    if (loading) {
+                        loading.innerHTML = '<span style="color:var(--text3);font-size:11px;text-align:center;padding:0 16px">Daily data unavailable<br><span style="font-size:10px;opacity:.7">API limit reached — try again tomorrow</span></span>';
+                    }
+                    return;
+                }
+
+                if (loading) loading.style.display = 'none';
+                if (canvas)  canvas.style.display  = '';
+
+                if (typeof state !== 'undefined') state.dailyVol[symbol] = data.prices;
+                if (typeof doRenderDailyVolChart === 'function') {
+                    requestAnimationFrame(() => doRenderDailyVolChart(symbol, fvcCtx));
+                }
+            })
+            .catch(err => {
+                if (!cards[id]) return;
+                const loading = document.getElementById(`fvc-loading-${id}`);
+                if (loading) loading.textContent = 'Failed to load daily data.';
+                console.error('[FloatingVolCards] daily-vol fetch error:', err);
+            });
 
         makeDraggable(el, id);
         el.addEventListener('mousedown', () => lift(el), true);
@@ -138,11 +167,13 @@ const FloatingVolCards = (() => {
 
 // ── VolStack ─────────────────────────────────────────────────────────────
 const VolStack = (() => {
-    let volumes = [];   // [{ symbol, origCtx }]
-    let active  = 0;
-    let mode    = 'list';
-    let el      = null;
-    let vsBody  = null;
+    let volumes      = [];   // [{ symbol, origCtx }]
+    let active       = 0;
+    let mode         = 'list';
+    let el           = null;
+    let vsBody       = null;
+    let _listRendered  = new Set();  // symbols currently rendered in list mode
+    let _lastRenderMode = null;
     let zTop    = 3500;
 
     const CTX = sym => `vs_${sym}_`;
@@ -272,17 +303,18 @@ const VolStack = (() => {
 
     function renderBody() {
         if (!vsBody) return;
-        destroyCharts();
-        vsBody.innerHTML = '';
 
         const cnt = document.getElementById('vs-count');
         if (cnt) cnt.textContent = volumes.length ? `(${volumes.length})` : '';
 
         if (!volumes.length) {
+            destroyCharts();
             vsBody.innerHTML = `<div class="vs-empty">
                 No volume charts yet.<br>
                 Click <span style="opacity:.7">⊞</span> on a floating volume card to add.
             </div>`;
+            _listRendered.clear();
+            _lastRenderMode = null;
             return;
         }
 
@@ -314,19 +346,46 @@ const VolStack = (() => {
     }
 
     function renderListMode() {
+        // Full rebuild needed when switching from stack mode
+        if (_lastRenderMode !== 'list') {
+            destroyCharts();
+            vsBody.innerHTML = '';
+            _listRendered.clear();
+        }
+        _lastRenderMode = 'list';
         vsBody.style.overflowY = 'auto';
 
+        const currentSyms = new Set(volumes.map(v => v.symbol));
+
+        // Remove symbols no longer in volumes
+        for (const sym of [..._listRendered]) {
+            if (!currentSyms.has(sym)) {
+                destroyCharts([sym]);
+                document.getElementById(`vol-canvas-${CTX(sym)}${sym}`)
+                    ?.closest('.vs-vol-wrap')?.remove();
+                _listRendered.delete(sym);
+            }
+        }
+
+        // Append new symbols
         for (const { symbol } of volumes) {
-            const wrap = buildVolEntry(symbol);
-            vsBody.appendChild(wrap);
-            if (typeof doRenderVolumeChart === 'function' &&
-                typeof state !== 'undefined' && state.prices[symbol]?.length) {
-                requestAnimationFrame(() => doRenderVolumeChart(symbol, CTX(symbol)));
+            if (!_listRendered.has(symbol)) {
+                const wrap = buildVolEntry(symbol);
+                vsBody.appendChild(wrap);
+                if (typeof doRenderVolumeChart === 'function' &&
+                    typeof state !== 'undefined' && state.prices[symbol]?.length) {
+                    requestAnimationFrame(() => doRenderVolumeChart(symbol, CTX(symbol)));
+                }
+                _listRendered.add(symbol);
             }
         }
     }
 
     function renderStackMode() {
+        destroyCharts();
+        vsBody.innerHTML = '';
+        _listRendered.clear();
+        _lastRenderMode = 'stack';
         vsBody.style.overflowY = 'hidden';
 
         // Active card

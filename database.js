@@ -176,6 +176,50 @@ db.exec(`
     );
 `);
 
+db.exec(`
+    CREATE TABLE IF NOT EXISTS daily_vol (
+        symbol TEXT NOT NULL,
+        date   TEXT NOT NULL,
+        close  REAL,
+        volume INTEGER,
+        PRIMARY KEY (symbol, date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_vol_sym_date ON daily_vol (symbol, date);
+
+    CREATE TABLE IF NOT EXISTS latest_indicators (
+        symbol       TEXT PRIMARY KEY,
+        date         TEXT,
+        close        REAL,
+        rsi          REAL,
+        macd_line    REAL,
+        macd_signal  REAL,
+        macd_hist    REAL,
+        bb_upper     REAL,
+        bb_mid       REAL,
+        bb_lower     REAL,
+        bb_pct       REAL,
+        vol_ratio    REAL,
+        roc_4w       REAL,
+        roc_12w      REAL,
+        hi_52w       REAL,
+        peer_rank    REAL,
+        score        REAL,
+        score_rsi    REAL,
+        score_macd   REAL,
+        score_bb     REAL,
+        score_vol    REAL,
+        score_peer   REAL,
+        score_eps    REAL,
+        obv_roc4     REAL,
+        dist_200w    REAL,
+        dist_50w     REAL,
+        golden_cross INTEGER,
+        confluence   INTEGER,
+        score_obv    REAL,
+        score_ma     REAL
+    );
+`);
+
 // ── Schema migrations (idempotent) ────────────────────────────────────
 (function migrate() {
     const indCols  = new Set(db.prepare('PRAGMA table_info(indicators)').all().map(c => c.name));
@@ -203,6 +247,30 @@ db.exec(`
 
     // Sector health on signals (for regime conditioning)
     addSig('sector_health', 'REAL');
+
+    // OHLC columns on daily_prices (added for candlestick chart support)
+    const priceCols = new Set(db.prepare('PRAGMA table_info(daily_prices)').all().map(c => c.name));
+    if (!priceCols.has('open')) db.exec('ALTER TABLE daily_prices ADD COLUMN open REAL');
+    if (!priceCols.has('high')) db.exec('ALTER TABLE daily_prices ADD COLUMN high REAL');
+    if (!priceCols.has('low'))  db.exec('ALTER TABLE daily_prices ADD COLUMN low  REAL');
+
+    // Seed latest_indicators cache from existing data (one-time backfill)
+    if (db.prepare('SELECT COUNT(*) as n FROM latest_indicators').get().n === 0) {
+        db.exec(`
+            INSERT OR REPLACE INTO latest_indicators
+                (symbol, date, close, rsi, macd_line, macd_signal, macd_hist,
+                 bb_upper, bb_mid, bb_lower, bb_pct, vol_ratio, roc_4w, roc_12w, hi_52w, peer_rank,
+                 score, score_rsi, score_macd, score_bb, score_vol, score_peer, score_eps,
+                 obv_roc4, dist_200w, dist_50w, golden_cross, confluence, score_obv, score_ma)
+            SELECT i.symbol, i.date, i.close, i.rsi, i.macd_line, i.macd_signal, i.macd_hist,
+                   i.bb_upper, i.bb_mid, i.bb_lower, i.bb_pct, i.vol_ratio, i.roc_4w, i.roc_12w, i.hi_52w, i.peer_rank,
+                   i.score, i.score_rsi, i.score_macd, i.score_bb, i.score_vol, i.score_peer, i.score_eps,
+                   i.obv_roc4, i.dist_200w, i.dist_50w, i.golden_cross, i.confluence, i.score_obv, i.score_ma
+            FROM indicators i
+            INNER JOIN (SELECT symbol, MAX(date) max_date FROM indicators GROUP BY symbol) m
+                ON i.symbol = m.symbol AND i.date = m.max_date
+        `);
+    }
 })();
 
 // ── Indexes (idempotent) ──────────────────────────────────────────────
@@ -214,16 +282,19 @@ db.exec(`
     CREATE INDEX IF NOT EXISTS idx_transcripts_sym  ON transcripts(symbol, filed_date DESC);
     CREATE INDEX IF NOT EXISTS idx_ts_sym           ON transcript_signals(symbol, filed_date ASC);
     CREATE INDEX IF NOT EXISTS idx_scheduler_log    ON scheduler_log(job_id, triggered_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_notifications    ON notifications(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_notifications         ON notifications(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_notifications_unread  ON notifications(read) WHERE read = 0;
 `);
 
 // ── Pre-compiled statements ───────────────────────────────────────────
-const _savePrice             = db.prepare('INSERT OR REPLACE INTO daily_prices (symbol,date,close,volume) VALUES (?,?,?,?)');
+const _savePrice             = db.prepare('INSERT OR REPLACE INTO daily_prices (symbol,date,open,high,low,close,volume) VALUES (?,?,?,?,?,?,?)');
 const _saveFetchLog          = db.prepare('INSERT OR REPLACE INTO fetch_log (symbol,last_fetched,status,row_count) VALUES (?,?,?,?)');
-const _getPrices             = db.prepare('SELECT date,close,volume FROM daily_prices WHERE symbol=? AND date>=? ORDER BY date ASC');
-const _getPricesAll          = db.prepare('SELECT date,close,volume FROM daily_prices WHERE symbol=? ORDER BY date ASC');
+const _getPrices             = db.prepare('SELECT date,open,high,low,close,volume FROM daily_prices WHERE symbol=? AND date>=? ORDER BY date ASC');
+const _getPricesAll          = db.prepare('SELECT date,open,high,low,close,volume FROM daily_prices WHERE symbol=? ORDER BY date ASC');
 const _hasPrices             = db.prepare('SELECT COUNT(*) as n FROM daily_prices WHERE symbol=?');
-const _hasVolumeData         = db.prepare('SELECT COUNT(*) as n FROM daily_prices WHERE symbol=? AND volume > 0');
+const _hasPricesAny          = db.prepare('SELECT COUNT(*) as n FROM daily_prices LIMIT 1');
+const _hasVolumeData         = db.prepare('SELECT COUNT(*) as n FROM daily_prices WHERE symbol=? AND volume IS NOT NULL');
+const _hasOhlcData           = db.prepare('SELECT COUNT(*) as n FROM daily_prices WHERE symbol=? AND open IS NOT NULL');
 const _getLastPriceDate      = db.prepare('SELECT MAX(date) as d FROM daily_prices WHERE symbol=?');
 const _touchFetchLog         = db.prepare(
     'INSERT INTO fetch_log (symbol,last_fetched,status,row_count) VALUES (?,?,?,0) ' +
@@ -242,9 +313,17 @@ const _saveIndicators        = db.prepare(`INSERT OR REPLACE INTO indicators
      score,score_rsi,score_macd,score_bb,score_vol,score_peer,score_eps,
      obv_roc4,dist_200w,dist_50w,golden_cross,confluence,score_obv,score_ma)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-const _getLatestIndicators   = db.prepare(`SELECT i.* FROM indicators i
-    INNER JOIN (SELECT symbol, MAX(date) max_date FROM indicators GROUP BY symbol) m
-    ON i.symbol=m.symbol AND i.date=m.max_date`);
+const _getLatestIndicators   = db.prepare('SELECT * FROM latest_indicators');
+const _updateLatestIndicator = db.prepare(`INSERT OR REPLACE INTO latest_indicators
+    (symbol, date, close, rsi, macd_line, macd_signal, macd_hist,
+     bb_upper, bb_mid, bb_lower, bb_pct, vol_ratio, roc_4w, roc_12w, hi_52w, peer_rank,
+     score, score_rsi, score_macd, score_bb, score_vol, score_peer, score_eps,
+     obv_roc4, dist_200w, dist_50w, golden_cross, confluence, score_obv, score_ma)
+    SELECT symbol, date, close, rsi, macd_line, macd_signal, macd_hist,
+           bb_upper, bb_mid, bb_lower, bb_pct, vol_ratio, roc_4w, roc_12w, hi_52w, peer_rank,
+           score, score_rsi, score_macd, score_bb, score_vol, score_peer, score_eps,
+           obv_roc4, dist_200w, dist_50w, golden_cross, confluence, score_obv, score_ma
+    FROM indicators WHERE symbol=? ORDER BY date DESC LIMIT 1`);
 const _getIndicators         = db.prepare('SELECT * FROM indicators WHERE symbol=? ORDER BY date ASC');
 const _saveSignals           = db.prepare(`INSERT OR REPLACE INTO signals
     (symbol,date,type,score,description,fwd_4w,fwd_8w,fwd_12w,sector_health)
@@ -289,21 +368,31 @@ const _advPrices             = db.prepare('SELECT COUNT(*) as n, MAX(date) as la
 const _advEdgar              = db.prepare('SELECT COUNT(*) as n, MAX(filed_date) as last FROM transcripts WHERE symbol=?');
 const _saveInference         = db.prepare(`INSERT OR REPLACE INTO inference_cache (symbol, result, created_at) VALUES (?, ?, datetime('now'))`);
 const _getInference          = db.prepare('SELECT * FROM inference_cache WHERE symbol=?');
+const _inferenceExists       = db.prepare('SELECT created_at FROM inference_cache WHERE symbol=?');
 const _edgarByType           = db.prepare('SELECT source_type, COUNT(*) as cnt FROM transcripts GROUP BY source_type ORDER BY cnt DESC');
 const _edgarBySymbol         = db.prepare('SELECT symbol, COUNT(*) as cnt FROM transcripts GROUP BY symbol ORDER BY symbol');
 const _edgarRange            = db.prepare('SELECT MIN(filed_date) as first, MAX(filed_date) as last, COUNT(*) as total FROM transcripts');
 const _saveSchedulerRun      = db.prepare('INSERT INTO scheduler_log (job_id, status, message) VALUES (?, ?, ?)');
 const _getLastSchedulerRun   = db.prepare('SELECT * FROM scheduler_log WHERE job_id=? ORDER BY triggered_at DESC LIMIT 1');
 const _getSchedulerLog       = db.prepare('SELECT * FROM scheduler_log ORDER BY triggered_at DESC LIMIT ?');
+const _saveDailyVol          = db.prepare('INSERT OR REPLACE INTO daily_vol (symbol, date, close, volume) VALUES (?,?,?,?)');
+const _getDailyVol           = db.prepare('SELECT date, close, volume FROM daily_vol WHERE symbol=? AND date>=? ORDER BY date ASC');
+const _getLastDailyVolDate   = db.prepare('SELECT MAX(date) as d FROM daily_vol WHERE symbol=?');
+const _hasDailyVol           = db.prepare('SELECT COUNT(*) as n FROM daily_vol WHERE symbol=?');
 const _saveNotification      = db.prepare('INSERT INTO notifications (type, message, symbols) VALUES (?, ?, ?)');
 const _getNotifications      = db.prepare('SELECT * FROM notifications ORDER BY created_at DESC LIMIT ?');
 const _markAllNotifsRead     = db.prepare('UPDATE notifications SET read = 1 WHERE read = 0');
 const _unreadNotifCount      = db.prepare('SELECT COUNT(*) as n FROM notifications WHERE read = 0');
 
+// Statement caches for variable-length IN clauses (keyed by symbol count)
+const _priceStatusStmts = new Map();
+const _fetchLogStmts    = new Map();
+
 module.exports = {
     savePrices(symbol, prices) {
         db.transaction(() => {
-            for (const r of prices) _savePrice.run(symbol, r.date, r.close, r.volume || 0);
+            for (const r of prices)
+                _savePrice.run(symbol, r.date, r.open ?? null, r.high ?? null, r.low ?? null, r.close, r.volume ?? null);
         })();
         _saveFetchLog.run(symbol, new Date().toISOString(), 'success', prices.length);
     },
@@ -322,8 +411,37 @@ module.exports = {
         return _hasPrices.get(symbol).n > 0;
     },
 
+    hasPricesAny() {
+        return _hasPricesAny.get().n > 0;
+    },
+
     hasVolumeData(symbol) {
         return _hasVolumeData.get(symbol).n > 0;
+    },
+
+    hasOhlcData(symbol) {
+        return _hasOhlcData.get(symbol).n > 0;
+    },
+
+    // ── Daily volume (for expanded floating vol card) ─────────────────
+    saveDailyVol(symbol, rows) {
+        db.transaction(() => {
+            for (const r of rows) _saveDailyVol.run(symbol, r.date, r.close ?? null, r.volume || 0);
+        })();
+    },
+
+    getDailyVol(symbol, months = 24) {
+        const cutoff = new Date();
+        cutoff.setMonth(cutoff.getMonth() - months);
+        return _getDailyVol.all(symbol, cutoff.toISOString().split('T')[0]);
+    },
+
+    getLastDailyVolDate(symbol) {
+        return _getLastDailyVolDate.get(symbol)?.d ?? null;
+    },
+
+    hasDailyVol(symbol) {
+        return _hasDailyVol.get(symbol).n > 0;
     },
 
     getLastPriceDate(symbol) {
@@ -341,16 +459,22 @@ module.exports = {
 
     getPriceStatus(symbols) {
         if (!symbols.length) return {};
-        const ph = symbols.map(() => '?').join(',');
-        const rows = db.prepare(`SELECT DISTINCT symbol FROM daily_prices WHERE symbol IN (${ph})`).all(symbols);
+        if (!_priceStatusStmts.has(symbols.length)) {
+            const ph = symbols.map(() => '?').join(',');
+            _priceStatusStmts.set(symbols.length, db.prepare(`SELECT DISTINCT symbol FROM daily_prices WHERE symbol IN (${ph})`));
+        }
+        const rows = _priceStatusStmts.get(symbols.length).all(symbols);
         const has = new Set(rows.map(r => r.symbol));
         return Object.fromEntries(symbols.map(s => [s, has.has(s)]));
     },
 
     getFetchLogs(symbols) {
         if (!symbols.length) return {};
-        const ph = symbols.map(() => '?').join(',');
-        const rows = db.prepare(`SELECT * FROM fetch_log WHERE symbol IN (${ph})`).all(symbols);
+        if (!_fetchLogStmts.has(symbols.length)) {
+            const ph = symbols.map(() => '?').join(',');
+            _fetchLogStmts.set(symbols.length, db.prepare(`SELECT * FROM fetch_log WHERE symbol IN (${ph})`));
+        }
+        const rows = _fetchLogStmts.get(symbols.length).all(symbols);
         const map = new Map(rows.map(r => [r.symbol, r]));
         return Object.fromEntries(symbols.map(s => [s, map.get(s) || null]));
     },
@@ -403,6 +527,7 @@ module.exports = {
                     cmp.obv, cmp.ma
                 );
             }
+            _updateLatestIndicator.run(symbol);
         })();
     },
 
@@ -528,6 +653,10 @@ module.exports = {
     // ── Inference cache ───────────────────────────────────────────────
     saveInferenceResult(symbol, result) {
         _saveInference.run(symbol, result);
+    },
+
+    getInferenceMeta(symbol) {
+        return _inferenceExists.get(symbol) || null;
     },
 
     getInferenceResult(symbol) {

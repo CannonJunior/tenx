@@ -25,6 +25,27 @@ const SIGNAL_ORDER = [
     'obv_divergence','ma_200w_cross','golden_cross',
 ];
 
+// ── Scanner row formatters — defined once at module scope ─────────────
+const _scoreBar = s => {
+    if (s == null) return '—';
+    const color = s >= 70 ? 'var(--green)' : s >= 50 ? 'var(--yellow)' : 'var(--red)';
+    return `<div class="score-bar-wrap" title="${s.toFixed(1)}">
+        <div class="score-bar-fill" style="width:${Math.min(100,s)}%;background:${color}"></div>
+        <span class="score-bar-label">${s.toFixed(0)}</span>
+    </div>`;
+};
+const _fmtRSI  = v => v == null ? '—' : `<span class="${v>=60?'positive':v<=40?'negative':''}">${v.toFixed(0)}</span>`;
+const _fmtMACD = v => v == null ? '—' : `<span class="${v>0?'positive':'negative'}">${v>0?'▲':'▼'}</span>`;
+const _fmtVol  = v => v == null ? '—' : `<span class="${v>=1.2?'positive':v<=0.8?'negative':''}">${v.toFixed(2)}×</span>`;
+const _fmtRank = v => v == null ? '—' : `<span class="${v>=0.6?'positive':v<=0.3?'negative':''}">#${10-Math.round(v*9)}</span>`;
+const _fmtOBV  = v => v == null ? '—' : `<span class="${v>2?'positive':v<-2?'negative':''}">${v>0?'+':''}${v.toFixed(1)}%</span>`;
+const _fmtMA   = v => v == null ? '—' : `<span class="${v>0?'positive':v<-10?'negative':''}">${v>0?'+':''}${v.toFixed(1)}%</span>`;
+const _fmtConf = v => {
+    if (!v) return '<span class="text3">—</span>';
+    const color = v >= 4 ? 'var(--green)' : v >= 2 ? 'var(--yellow)' : 'var(--text2)';
+    return `<span style="color:${color};font-weight:700">${'⚡'.repeat(Math.min(v,4))} ${v}</span>`;
+};
+
 const ModelView = {
     data:              null,
     regimeData:        null,
@@ -226,25 +247,6 @@ const ModelView = {
 
     // Extracted row renderer — called by both renderScanner() and refreshScanner()
     renderScannerRows(rows) {
-        const scoreBar = s => {
-            if (s == null) return '—';
-            const color = s >= 70 ? 'var(--green)' : s >= 50 ? 'var(--yellow)' : 'var(--red)';
-            return `<div class="score-bar-wrap" title="${s.toFixed(1)}">
-                <div class="score-bar-fill" style="width:${Math.min(100,s)}%;background:${color}"></div>
-                <span class="score-bar-label">${s.toFixed(0)}</span>
-            </div>`;
-        };
-        const fmtRSI  = v => v == null ? '—' : `<span class="${v>=60?'positive':v<=40?'negative':''}">${v.toFixed(0)}</span>`;
-        const fmtMACD = v => v == null ? '—' : `<span class="${v>0?'positive':'negative'}">${v>0?'▲':'▼'}</span>`;
-        const fmtVol  = v => v == null ? '—' : `<span class="${v>=1.2?'positive':v<=0.8?'negative':''}">${v.toFixed(2)}×</span>`;
-        const fmtRank = v => v == null ? '—' : `<span class="${v>=0.6?'positive':v<=0.3?'negative':''}">#${10-Math.round(v*9)}</span>`;
-        const fmtOBV  = v => v == null ? '—' : `<span class="${v>2?'positive':v<-2?'negative':''}">${v>0?'+':''}${v.toFixed(1)}%</span>`;
-        const fmtMA   = v => v == null ? '—' : `<span class="${v>0?'positive':v<-10?'negative':''}">${v>0?'+':''}${v.toFixed(1)}%</span>`;
-        const fmtConf = v => {
-            if (!v) return '<span class="text3">—</span>';
-            const color = v >= 4 ? 'var(--green)' : v >= 2 ? 'var(--yellow)' : 'var(--text2)';
-            return `<span style="color:${color};font-weight:700">${'⚡'.repeat(Math.min(v,4))} ${v}</span>`;
-        };
 
         const metaMap = this.getMetaMap();
 
@@ -263,14 +265,14 @@ const ModelView = {
             return `
             <tr class="scanner-row ${r.symbol===this.activeSymbol?'active':''}" data-sym="${r.symbol}">
                 <td>${symLabel}</td>
-                <td>${scoreBar(r.score)}</td>
-                <td>${fmtConf(r.confluence)}</td>
-                <td>${fmtRSI(r.rsi)}</td>
-                <td>${fmtMACD(r.macd_hist)}</td>
-                <td>${fmtVol(r.vol_ratio)}</td>
-                <td>${fmtRank(r.peer_rank)}</td>
-                <td>${fmtOBV(r.obv_roc4)}</td>
-                <td>${fmtMA(r.dist_200w)}</td>
+                <td>${_scoreBar(r.score)}</td>
+                <td>${_fmtConf(r.confluence)}</td>
+                <td>${_fmtRSI(r.rsi)}</td>
+                <td>${_fmtMACD(r.macd_hist)}</td>
+                <td>${_fmtVol(r.vol_ratio)}</td>
+                <td>${_fmtRank(r.peer_rank)}</td>
+                <td>${_fmtOBV(r.obv_roc4)}</td>
+                <td>${_fmtMA(r.dist_200w)}</td>
                 <td>$${r.close?.toFixed(2)??'—'}</td>
                 <td>${fmtTarget}</td>
             </tr>`;
@@ -386,8 +388,9 @@ const ModelView = {
         const { indicators, signals } = this.detail;
         if (!indicators?.length) return;
 
+        const months = (typeof settings !== 'undefined' ? settings.dataWindow : 24) || 24;
         const cutoff = new Date();
-        cutoff.setMonth(cutoff.getMonth() - 24);
+        cutoff.setMonth(cutoff.getMonth() - months);
         const cutStr = cutoff.toISOString().split('T')[0];
         const rows = indicators.filter(r => r.date >= cutStr);
         if (!rows.length) return;
@@ -430,11 +433,12 @@ const ModelView = {
 
         // Breakout score
         const _thresh = (typeof settings !== 'undefined') ? settings.breakoutThreshold : 70;
+        const b100 = base(0, 100);
         const sc = document.getElementById(`dc-score-${symbol}`);
         if (sc) push(new Chart(sc, { type:'line', data:{ labels, datasets:[
             { data:rows.map(r=>r.score), borderColor:'#D29922', backgroundColor:rgba('#D29922',0.15), borderWidth:1.5, pointRadius:0, fill:true },
             { data:rows.map(()=>_thresh), borderColor:'#3FB950', borderDash:[3,3], borderWidth:1, pointRadius:0, fill:false },
-        ]}, options:{...base(0,100), scales:{...base(0,100).scales, y:{...base(0,100).scales.y, ticks:{color:'#6E7681',callback:v=>v.toFixed(0)}}}} }));
+        ]}, options:{...b100, scales:{...b100.scales, y:{...b100.scales.y, ticks:{color:'#6E7681',callback:v=>v.toFixed(0)}}}} }));
 
         // RSI
         const rc = document.getElementById(`dc-rsi-${symbol}`);
@@ -464,22 +468,26 @@ const ModelView = {
             ]}, options:base(0) }));
         }
 
-        // Peer rank
-        const rkc = document.getElementById(`dc-rank-${symbol}`);
-        if (rkc) push(new Chart(rkc, { type:'line', data:{ labels, datasets:[
-            { data:rows.map(r=>r.peer_rank!=null?r.peer_rank*100:null), borderColor:'#DDA0DD', backgroundColor:rgba('#DDA0DD',0.15), borderWidth:1.5, pointRadius:0, fill:true },
-            { data:rows.map(()=>50), borderColor:'#6E7681', borderDash:[3,3], borderWidth:1, pointRadius:0, fill:false },
-        ]}, options:{...base(0,100), scales:{...base(0,100).scales, y:{...base(0,100).scales.y, ticks:{color:'#6E7681',callback:v=>v===100?'#1':v===0?'#10':''}}}} }));
+        // Peer rank and OBV are non-critical — defer to keep the initial render responsive
+        setTimeout(() => {
+            const rkc = document.getElementById(`dc-rank-${symbol}`);
+            if (rkc) {
+                const b100r = base(0, 100);
+                push(new Chart(rkc, { type:'line', data:{ labels, datasets:[
+                    { data:rows.map(r=>r.peer_rank!=null?r.peer_rank*100:null), borderColor:'#DDA0DD', backgroundColor:rgba('#DDA0DD',0.15), borderWidth:1.5, pointRadius:0, fill:true },
+                    { data:rows.map(()=>50), borderColor:'#6E7681', borderDash:[3,3], borderWidth:1, pointRadius:0, fill:false },
+                ]}, options:{...b100r, scales:{...b100r.scales, y:{...b100r.scales.y, ticks:{color:'#6E7681',callback:v=>v===100?'#1':v===0?'#10':''}}}} }));
+            }
 
-        // OBV ROC
-        const oc = document.getElementById(`dc-obv-${symbol}`);
-        if (oc) {
-            const od = rows.map(r=>r.obv_roc4);
-            push(new Chart(oc, { type:'bar', data:{ labels, datasets:[
-                { data:od, backgroundColor:od.map(v=>v==null?'transparent':v>=0?rgba('#FF6B6B',0.7):rgba('#6E7681',0.4)), borderWidth:0 },
-                { data:rows.map(()=>0), type:'line', borderColor:'#6E7681', borderDash:[2,4], borderWidth:1, pointRadius:0, fill:false },
-            ]}, options:base() }));
-        }
+            const oc = document.getElementById(`dc-obv-${symbol}`);
+            if (oc) {
+                const od = rows.map(r=>r.obv_roc4);
+                push(new Chart(oc, { type:'bar', data:{ labels, datasets:[
+                    { data:od, backgroundColor:od.map(v=>v==null?'transparent':v>=0?rgba('#FF6B6B',0.7):rgba('#6E7681',0.4)), borderWidth:0 },
+                    { data:rows.map(()=>0), type:'line', borderColor:'#6E7681', borderDash:[2,4], borderWidth:1, pointRadius:0, fill:false },
+                ]}, options:base() }));
+            }
+        }, 0);
 
         // Transcript signals chart
         this.renderTranscriptChart(symbol);
@@ -767,8 +775,23 @@ const ModelView = {
     // ── Trigger server actions ────────────────────────────────────────
     async triggerCompute() {
         showStatus('Recomputing models…', 'info', true);
-        await fetch('/api/compute-models', { method:'POST' });
-        setTimeout(async () => { await this.load(); await this.loadRegime(); this.render(); hideStatus(); }, 5000);
+        const startRunAt = this.data?.modelRunAt ?? null;
+        await fetch('/api/compute-models', { method: 'POST' });
+
+        const poll = setInterval(async () => {
+            try {
+                const res = await fetch('/api/models').then(r => r.json());
+                if (res.modelRunAt && res.modelRunAt !== startRunAt) {
+                    clearInterval(poll);
+                    this.data = res;
+                    await this.loadRegime();
+                    this.render();
+                    showStatus('Models recomputed!', 'success');
+                    setTimeout(hideStatus, 3000);
+                }
+            } catch { /* keep polling */ }
+        }, 5000);
+        setTimeout(() => clearInterval(poll), 120000); // 2 min max
     },
 
     async triggerEarnings() {
@@ -788,7 +811,7 @@ const ModelView = {
                     setTimeout(hideStatus, 3000);
                 }
             } catch { /* keep polling */ }
-        }, 8000);
+        }, 15000);
         setTimeout(() => clearInterval(poll), 600000); // 10 min max
     },
 
@@ -825,7 +848,7 @@ const ModelView = {
                 showStatus('Transcripts loaded!', 'success');
                 setTimeout(hideStatus, 3000);
             }
-        }, 5000);
+        }, 15000);
         setTimeout(() => {
             if (this.transcriptPoll !== null) {
                 clearInterval(this.transcriptPoll);

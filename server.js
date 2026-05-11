@@ -12,6 +12,7 @@ const { fetchAllEarnings } = require('./fetch-earnings');
 const { fetchAllTranscripts } = require('./fetch-transcripts');
 const { backtestStats } = require('./models');
 const PORT = process.env.PORT || 9004;
+let _schedulesConfig = null;
 
 // ── Claude CLI streaming helper ───────────────────────────────────────
 // Uses the installed `claude` CLI (Claude Code) with the existing OAuth
@@ -22,6 +23,7 @@ function streamClaude(systemPrompt, userPrompt, serverRes) {
     return new Promise(resolve => {
         const claudePath = process.env.CLAUDE_PATH || 'claude';
 
+        const { ALPHA_VANTAGE_API_KEY, GREEN_PUSH_TOKEN, ...claudeEnv } = process.env;
         const proc = spawn(claudePath, [
             '-p', userPrompt,
             '--system-prompt', systemPrompt,
@@ -29,7 +31,7 @@ function streamClaude(systemPrompt, userPrompt, serverRes) {
             '--include-partial-messages',
             '--verbose',
             '--model', 'claude-sonnet-4-6',
-        ], { env: process.env });
+        ], { env: claudeEnv });
 
         let buf = '';
 
@@ -110,8 +112,7 @@ function fetchMediaFromAlphaVantage(symbol, fromDate) {
 function buildInferencePrompt(symbol) {
     const prices    = db.getPrices(symbol, 24);
     const inds      = db.getIndicators(symbol);
-    const signals   = db.getAllSignals ? db.getAllSignals() : [];
-    const sigs      = signals.filter(s => s.symbol === symbol).slice(-8);
+    const sigs      = db.getSignals(symbol).slice(-8);
     const transcSig = db.getTranscriptSignals(symbol);
     const media     = db.getMedia(symbol, 15);
     const allStocks = [...STOCKS];
@@ -181,6 +182,7 @@ const STOCKS = [
     { symbol: 'STX',   name: 'Seagate Technology',         subIndustry: 'Data Storage',                         estYearGrowth: -23 },
     { symbol: 'SMH',   name: 'VanEck Semiconductor ETF',   subIndustry: 'ETF',                                  estYearGrowth: 25,  isEtf: true },
 ];
+const STOCK_SYMBOLS = new Set(STOCKS.map(s => s.symbol));
 
 // S&P 500 stocks with highest short interest % of float (May 2026), ranked descending
 // Sources: Barchart, MarketBeat, Fintel — confirmed S&P 500 members
@@ -299,18 +301,21 @@ async function processQueue() {
                 ? (Date.now() - new Date(lastDate).getTime()) / 86400000
                 : Infinity;
             const hasVolume     = db.hasVolumeData(symbol);
+            const hasOhlc       = db.hasOhlcData(symbol);
 
-            if (daysSinceLast < 7 && hasVolume) {
+            if (daysSinceLast < 7 && hasVolume && hasOhlc) {
                 console.log(`[fetch] ${symbol} — current through ${lastDate}, skipped`);
                 resolve({ success: true, symbol, count: 0, skipped: true, lastDate });
             } else {
                 madeApiCall = true;
-                const reason = !hasVolume && lastDate ? 'volume backfill' : `last: ${lastDate ?? 'none'}`;
+                const reason = !hasVolume && lastDate ? 'volume backfill'
+                             : !hasOhlc   && lastDate ? 'ohlc backfill'
+                             : `last: ${lastDate ?? 'none'}`;
                 console.log(`[fetch] ${symbol} (${reason})`);
                 const prices = await fetchFromAlphaVantage(symbol);
-                // Full save when volume is missing so INSERT OR REPLACE updates existing rows.
-                // Incremental save otherwise — only records newer than what we have.
-                const toSave = (hasVolume && lastDate) ? prices.filter(p => p.date > lastDate) : prices;
+                // Full save when volume or OHLC is missing — INSERT OR REPLACE backfills
+                // those columns on existing rows. Incremental otherwise.
+                const toSave = (hasVolume && hasOhlc && lastDate) ? prices.filter(p => p.date > lastDate) : prices;
                 if (toSave.length > 0) {
                     db.savePrices(symbol, toSave);
                     console.log(`[saved] ${symbol}: ${toSave.length} records`);
@@ -372,7 +377,7 @@ function buildBellSummary() {
     });
     const indicators   = db.getLatestIndicators();
     const sectorHealth = db.getMeta('sector_health_latest');
-    const stockSymbols = new Set(STOCKS.map(s => s.symbol));
+    const stockSymbols = STOCK_SYMBOLS;
     const scored = indicators
         .filter(r => stockSymbols.has(r.symbol) && r.score != null)
         .sort((a, b) => b.score - a.score);
@@ -424,7 +429,7 @@ function buildClosePrompt(indicators, articles) {
     const dateStr = new Date().toLocaleDateString('en-US', {
         timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric',
     });
-    const stockSymbols = new Set(STOCKS.map(s => s.symbol));
+    const stockSymbols = STOCK_SYMBOLS;
     const scored = indicators
         .filter(r => stockSymbols.has(r.symbol) && r.score != null)
         .sort((a, b) => b.score - a.score);
@@ -466,6 +471,38 @@ Plain text only. Specific tickers. Under 1800 characters total.`;
     return { systemPrompt, userPrompt };
 }
 
+// TIME_SERIES_DAILY (free tier) — used for the expanded floating volume card.
+// Uses unadjusted close; volume data is identical to the adjusted endpoint.
+// outputsize=compact → last 100 trading days; full → 20+ years of history.
+function fetchDailyFromAlphaVantage(symbol, outputsize = 'compact') {
+    const key = process.env.ALPHA_VANTAGE_API_KEY;
+    const endpoint = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${symbol}&outputsize=${outputsize}&apikey=${key}`;
+    return new Promise((resolve, reject) => {
+        https.get(endpoint, res => {
+            let raw = '';
+            res.on('data', c => { raw += c; });
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(raw);
+                    if (json['Error Message']) return reject(new Error(json['Error Message']));
+                    if (json['Note'])          return reject(new Error('Rate limit: ' + json['Note']));
+                    if (json['Information'])   return reject(new Error('API limit: ' + json['Information']));
+                    const ts = json['Time Series (Daily)'];
+                    if (!ts) return reject(new Error('No daily time series in response'));
+                    const rows = Object.entries(ts)
+                        .map(([date, v]) => ({
+                            date,
+                            close:  parseFloat(v['4. close']),
+                            volume: parseInt(v['5. volume'], 10),
+                        }))
+                        .sort((a, b) => a.date < b.date ? -1 : 1);
+                    resolve(rows);
+                } catch (e) { reject(e); }
+            });
+        }).on('error', reject);
+    });
+}
+
 // Uses TIME_SERIES_WEEKLY_ADJUSTED (free tier): full history, split-adjusted prices.
 // "5. adjusted close" corrects for stock splits (e.g. NVDA 10:1 in Jun 2024, AVGO 10:1 in Jul 2024).
 function fetchFromAlphaVantage(symbol) {
@@ -485,11 +522,21 @@ function fetchFromAlphaVantage(symbol) {
                     const ts = json['Weekly Adjusted Time Series'];
                     if (!ts) return reject(new Error('No time series in response'));
                     const prices = Object.entries(ts)
-                        .map(([date, v]) => ({
-                            date,
-                            close:  parseFloat(v['5. adjusted close']),
-                            volume: parseInt(v['6. volume'], 10),
-                        }))
+                        .map(([date, v]) => {
+                            const rawClose = parseFloat(v['4. close']);
+                            const adjClose = parseFloat(v['5. adjusted close']);
+                            // Scale raw OHLC by the adjustment factor so all values
+                            // are split/dividend-adjusted and consistent with adjClose.
+                            const adj = rawClose > 0 ? adjClose / rawClose : 1;
+                            return {
+                                date,
+                                open:   parseFloat(v['1. open']) * adj,
+                                high:   parseFloat(v['2. high']) * adj,
+                                low:    parseFloat(v['3. low'])  * adj,
+                                close:  adjClose,
+                                volume: parseInt(v['6. volume'], 10),
+                            };
+                        })
                         .sort((a, b) => a.date < b.date ? -1 : 1);
                     resolve(prices);
                 } catch (e) {
@@ -501,7 +548,7 @@ function fetchFromAlphaVantage(symbol) {
 }
 
 function json(res, data, status = 200) {
-    res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': `http://localhost:${PORT}` });
     res.end(JSON.stringify(data));
 }
 
@@ -522,7 +569,7 @@ const server = http.createServer(async (req, res) => {
     const query    = Object.fromEntries(parsed.searchParams);
 
     if (req.method === 'OPTIONS') {
-        res.writeHead(200, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST' });
+        res.writeHead(200, { 'Access-Control-Allow-Origin': `http://localhost:${PORT}`, 'Access-Control-Allow-Methods': 'GET,POST' });
         res.end();
         return;
     }
@@ -573,6 +620,15 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    // GET /api/inference-meta/:symbol — lightweight check (exists + timestamp, no result text)
+    if (pathname.startsWith('/api/inference-meta/') && req.method === 'GET') {
+        const symbol = pathname.split('/')[3]?.toUpperCase();
+        if (!symbol) return json(res, { error: 'symbol required' }, 400);
+        const meta = db.getInferenceMeta(symbol);
+        json(res, { exists: !!meta, created_at: meta?.created_at ?? null });
+        return;
+    }
+
     // GET /api/inference/:symbol — retrieve cached inference result
     if (pathname.startsWith('/api/inference/') && req.method === 'GET') {
         const symbol = pathname.split('/')[3]?.toUpperCase();
@@ -593,7 +649,7 @@ const server = http.createServer(async (req, res) => {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             'Connection':    'keep-alive',
-            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Origin': `http://localhost:${PORT}`,
         });
 
         // Intercept writes to accumulate full text while still streaming to client
@@ -911,7 +967,7 @@ const server = http.createServer(async (req, res) => {
     // GET /api/schedules — job config with last-run status
     if (pathname === '/api/schedules') {
         try {
-            const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'schedules.json'), 'utf8'));
+            const config = _schedulesConfig;
             json(res, {
                 timezone: config.timezone,
                 jobs: config.jobs.map(job => ({
@@ -928,6 +984,41 @@ const server = http.createServer(async (req, res) => {
         } catch (err) {
             json(res, { error: err.message }, 500);
         }
+        return;
+    }
+
+    // GET /api/daily-vol — returns stored daily price+volume; auto-fetches if missing or > 1 day stale
+    if (pathname === '/api/daily-vol' && req.method === 'GET') {
+        const symbol = query.symbol?.toUpperCase();
+        if (!symbol) return json(res, { error: 'symbol required' }, 400);
+
+        const lastFetchedKey  = `daily_vol_fetched_${symbol}`;
+        const lastFetched     = db.getMeta(lastFetchedKey);
+        const hoursSinceFetch = lastFetched
+            ? (Date.now() - new Date(lastFetched).getTime()) / 3600000
+            : Infinity;
+
+        if (hoursSinceFetch >= 20) {
+            try {
+                console.log(`[daily-vol] fetching ${symbol} (compact)`);
+                const rows     = await fetchDailyFromAlphaVantage(symbol, 'compact');
+                const lastDate = db.getLastDailyVolDate(symbol);
+                const toSave   = lastDate ? rows.filter(r => r.date > lastDate) : rows;
+                if (toSave.length > 0) {
+                    db.saveDailyVol(symbol, toSave);
+                    console.log(`[daily-vol] saved ${toSave.length} rows for ${symbol}`);
+                }
+            } catch (err) {
+                console.error(`[daily-vol] fetch error for ${symbol}:`, err.message);
+                // Fall through — return whatever is already stored
+            } finally {
+                // Always stamp the time so we don't hammer the API on every request
+                db.setMeta(lastFetchedKey, new Date().toISOString());
+            }
+        }
+
+        const rows = db.getDailyVol(symbol, 24);
+        json(res, { symbol, prices: rows, count: rows.length });
         return;
     }
 
@@ -958,12 +1049,18 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
+    try {
+        _schedulesConfig = JSON.parse(fs.readFileSync(path.join(__dirname, 'schedules.json'), 'utf8'));
+    } catch (e) {
+        console.warn('[startup] schedules.json not found or invalid:', e.message);
+        _schedulesConfig = { timezone: 'UTC', jobs: [] };
+    }
     console.log(`TenX Stock Analyzer → http://localhost:${PORT}`);
     console.log(`Tracking ${STOCKS.length} semiconductor stocks (${STOCKS.map(s => s.symbol).join(', ')})`);
     console.log(`Alpha Vantage key: ${process.env.ALPHA_VANTAGE_API_KEY ? '✓' : '✗ MISSING'}`);
 
     // Auto-compute models on startup if price data exists but indicators haven't been built yet
-    if (!db.hasIndicators() && STOCKS.some(s => db.hasPrices(s.symbol))) {
+    if (!db.hasIndicators() && db.hasPricesAny()) {
         console.log('[startup] Running initial model computation...');
         computeAndStore().catch(err => console.error('[startup] model error:', err.message));
     }

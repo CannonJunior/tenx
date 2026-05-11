@@ -60,19 +60,26 @@ function toggleAdvanced(sid, symbol) {
     if (!open && typeof updateCardNotifDots === 'function') updateCardNotifDots();
 }
 
+const _advStatusCache = new Map(); // symbol → advanced-status payload
+
 // ── Load button states + any cached inference result ─────────────────
 async function loadAdvancedStatus(symbol, sid) {
     try {
-        const [s, cached] = await Promise.all([
+        const [s, meta] = await Promise.all([
             fetch(`/api/advanced-status/${symbol}`).then(r => r.json()),
-            fetch(`/api/inference/${symbol}`).then(r => r.json()),
+            fetch(`/api/inference-meta/${symbol}`).then(r => r.json()),
         ]);
+        _advStatusCache.set(symbol, s);
         applyBtnState(`adv-media-${sid}`, `adv-media-count-${sid}`, s.media.count,  s.media.lastFetch ? `${s.media.count} articles` : null);
         applyBtnState(`adv-fetch-${sid}`, `adv-fetch-count-${sid}`, s.prices.count, s.prices.hasFetch ? formatDate(s.prices.hasFetch) : null);
         applyBtnState(`adv-edgar-${sid}`, `adv-edgar-count-${sid}`, s.edgar.count,  s.edgar.count > 0  ? `${s.edgar.count} docs` : null);
         const hasAny = s.prices.count > 0 || s.edgar.count > 0 || s.media.count > 0;
         applyBtnState(`adv-infer-${sid}`, `adv-infer-count-${sid}`, hasAny ? 1 : 0, null);
-        if (cached?.result) displayCachedInference(symbol, sid, cached);
+        if (meta?.exists) {
+            fetch(`/api/inference/${symbol}`).then(r => r.json()).then(cached => {
+                if (cached?.result) displayCachedInference(symbol, sid, cached);
+            }).catch(() => {});
+        }
     } catch { /* best-effort */ }
 }
 
@@ -131,16 +138,14 @@ function advSetBusy(btnId, busy, originalText) {
 async function advMedia(symbol, sid) {
     advSetBusy(`adv-media-${sid}`, true);
 
-    // Determine from-date: last media fetch, or start of price data
+    // Determine from-date from cached status (populated by loadAdvancedStatus)
     let fromDate = null;
-    try {
-        const status = await fetch(`/api/advanced-status/${symbol}`).then(r => r.json());
-        if (status.media.lastFetch) {
-            fromDate = status.media.lastFetch.split('T')[0];
-        } else if (state.prices[symbol]?.length) {
-            fromDate = state.prices[symbol][0].date;
-        }
-    } catch { /* proceed without from-date */ }
+    const _cachedStatus = _advStatusCache.get(symbol);
+    if (_cachedStatus?.media?.lastFetch) {
+        fromDate = _cachedStatus.media.lastFetch.split('T')[0];
+    } else if (state.prices[symbol]?.length) {
+        fromDate = state.prices[symbol][0].date;
+    }
 
     try {
         const res  = await fetch('/api/media/fetch', {
@@ -262,7 +267,7 @@ async function advEdgar(symbol, sid) {
                 advShowResult(sid, `<div class="adv-success">✓ ${status.edgar.count} EDGAR documents stored (latest: ${status.edgar.lastDate?.slice(0,10) || '?'})</div>`);
                 advSetBusy(`adv-edgar-${sid}`, false, 'EDGAR');
             }
-        }, 8000);
+        }, 15000);
         _edgarPolls.set(sid, poll);
     } catch(err) {
         advShowResult(sid, `<div class="adv-error">EDGAR fetch failed: ${err.message}</div>`);
@@ -325,12 +330,9 @@ async function advInfer(symbol, sid) {
         if (outputEl) outputEl.innerHTML = `<span class="adv-error">Inference error: ${err.message}</span>`;
     }
 
-    // Replace the live header with the saved-result view
+    // Replace the live output with the saved-result view using the already-captured text
     if (fullText) {
-        try {
-            const cached = await fetch(`/api/inference/${symbol}`).then(r => r.json());
-            if (cached?.result) displayCachedInference(symbol, sid, cached);
-        } catch { /* leave the live output in place if fetch fails */ }
+        displayCachedInference(symbol, sid, { result: fullText, created_at: new Date().toISOString() });
     }
 
     advSetBusy(`adv-infer-${sid}`, false, 'Inference');

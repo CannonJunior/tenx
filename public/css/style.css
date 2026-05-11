@@ -477,6 +477,9 @@ html, body {
     flex-shrink: 0;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .spinner-inline { animation: none; border-top-color: currentColor; opacity: 0.5; }
+}
 
 /* ── Stats Row ── */
 .stats-row {
@@ -734,6 +737,33 @@ html, body {
     position: relative;
 }
 .card-canvas-wrap canvas { width: 100% !important; height: 100% !important; }
+
+.card-chart-type {
+    position: absolute;
+    top: 10px;
+    right: 8px;
+    z-index: 2;
+    appearance: none;
+    -webkit-appearance: none;
+    background: rgba(22,27,34,0.82);
+    border: 1px solid var(--border);
+    color: var(--text3);
+    border-radius: var(--radius-sm);
+    padding: 2px 18px 2px 6px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    cursor: pointer;
+    backdrop-filter: blur(4px);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='%236E7681' stroke-width='2.5'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 4px center;
+    transition: border-color 0.12s, color 0.12s;
+}
+.card-chart-type:hover  { border-color: var(--text3); color: var(--text2); }
+.card-chart-type:focus  { outline: none; border-color: var(--accent); color: var(--text); }
+.card-chart-type option { background: var(--bg2); color: var(--text); }
 
 .card-footer {
     display: flex;
@@ -1016,7 +1046,7 @@ html, body {
     box-shadow: 0 12px 40px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.3);
     overflow: hidden;
     transition: width 0.18s ease, box-shadow 0.15s;
-    /* Prevent text selection while interacting */
+    will-change: width;
     user-select: none;
 }
 .floating-card.fc-expanded {
@@ -1560,6 +1590,7 @@ html, body {
 .floating-vol-card.fvc-dragging {
     opacity: 0.92;
     box-shadow: 0 20px 60px rgba(0,0,0,0.65);
+    will-change: transform;
 }
 .fvc-titlebar {
     display: flex;
@@ -1586,8 +1617,19 @@ html, body {
 .fvc-canvas-wrap {
     height: 360px;
     padding: 4px 6px 6px;
+    position: relative;
 }
 .fvc-canvas-wrap canvas { width: 100% !important; height: 100% !important; }
+.fvc-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text3);
+}
 
 /* ── Volume Stack ── */
 .vol-stack {
@@ -1604,7 +1646,7 @@ html, body {
     z-index: 3500;
     overflow: hidden;
 }
-.vol-stack.vs-dragging { opacity: 0.92; box-shadow: 0 20px 60px rgba(0,0,0,0.65); }
+.vol-stack.vs-dragging { opacity: 0.92; box-shadow: 0 20px 60px rgba(0,0,0,0.65); will-change: transform; }
 
 .vs-titlebar {
     display: flex; align-items: center; gap: 8px;
@@ -1681,6 +1723,38 @@ html, body {
     padding: 24px 16px; text-align: center; font-size: 12px; color: var(--text3); line-height: 1.7;
 }
 
+/* ── Volume signal model stats ── */
+.vol-model {
+    padding: 5px 12px 8px;
+    border-top: 1px solid var(--bg3);
+}
+.vol-model-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text3);
+    padding: 3px 0 4px;
+}
+.vol-model-note { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 9px; }
+.vol-model-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    border-bottom: 1px solid var(--bg3);
+    min-height: 20px;
+}
+.vol-model-row:last-child { border-bottom: none; }
+.vol-model-lbl   { font-size: 10px; color: var(--text2); flex-shrink: 0; min-width: 108px; }
+.vol-model-n     { font-size: 9px;  color: var(--text3); flex-shrink: 0; min-width: 26px; }
+.vol-model-fwds  { display: flex; gap: 8px; flex-wrap: wrap; }
+.vol-model-fwd   { font-size: 10px; font-weight: 600; white-space: nowrap; }
+.vol-model-empty { font-size: 10px; color: var(--text3); }
+
 /* ── Enable Advanced Analysis button (shown on notified cards) ── */
 .adv-enable-btn-wrap {
     padding: 8px 12px 10px;
@@ -1748,11 +1822,15 @@ html, body {
     background: var(--accent);
     margin-left: 5px;
     vertical-align: middle;
+    will-change: transform, opacity;
     animation: notif-pulse 2.5s ease-in-out infinite;
 }
 @keyframes notif-pulse {
     0%, 100% { opacity: 1;   transform: scale(1); }
     50%       { opacity: 0.4; transform: scale(0.75); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .card-notif-dot { animation: none; opacity: 0.8; }
 }
 
 /* ── Right-click drag to resize height ── */
